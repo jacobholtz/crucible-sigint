@@ -1511,14 +1511,24 @@ function renderUrlscanDomain(idx){
 // Standard-pipeline progress banner. Driven by the `stage` field on log events
 // (S1…S20) rather than the raw numeric stage events, which are unreliably numbered.
 const STD_STAGE_LABELS = {
-  INIT:'Initializing pipeline', S1:'Certificate transparency', S2:'DNS records',
-  S3:'IP intelligence', S4:'ASN intelligence', S5:'Registration (RDAP)',
-  S6:'urlscan.io corroboration', S7:'JS wallet-drain scan',
-  S9:'Shodan', S10:'VirusTotal passive DNS', S11:'Typosquatting (DNSTwist)',
-  S12:'SSL certificate graph', S13:'Reverse IP mapping', S14:'IOC correlation / social',
-  S16:'Subdomain discovery',
-  S18:'ThreatFox + OTX cross-reference', S19:'Platform pivots',
-  S20:'Google Threat Intelligence'
+  INIT:'Initializing pipeline',
+  S1:'Certificate transparency',
+  S2:'DNS records',
+  S3:'IP intelligence',
+  S4:'ASN intelligence',
+  S5:'Registration (RDAP)',
+  S6:'urlscan.io corroboration',
+  S7:'JS wallet-drain scan',
+  S8:'Shodan',
+  S9:'Passive DNS (VT / OTX / CIRCL / Mnemonic / self-tracking)',
+  S10:'ThreatFox + OTX cross-reference',
+  S11:'Platform pivots',
+  S12:'Google Threat Intelligence',
+  S13:'Reverse IP mapping',
+  S14:'IOC correlation',
+  S15:'SSL certificate graph',
+  S16:'Social media fingerprinting',
+  S17:'Subdomain discovery'
 };
 const STD_STAGE_ORDER = Object.keys(STD_STAGE_LABELS);
 let stdScanMaxIdx = -1;

@@ -1160,6 +1160,128 @@ def _iso_to_int(s: str) -> int:
 
 
 # ────────────────────────────────────────────────────────────────────
+# CIRCL.lu Passive DNS — historical A/AAAA records with timestamps.
+# Free for security researchers; requires registration. HTTP Basic auth
+# via username + password env vars. Returns NDJSON (one JSON per line).
+# Each row carries time_first/time_last as Unix epoch ints.
+# ────────────────────────────────────────────────────────────────────
+
+async def fetch_circl_pdns(
+    domain: str, username: str = "", password: str = "",
+) -> Dict[str, Any]:
+    """CIRCL.lu Passive DNS query for `domain`.
+
+    Returns:
+      domain: echoed
+      records: list of {ip, first, last, record_type, count} sorted
+               most-recent-first
+      count: len(records)
+    Empty list (no error) when CIRCL has no observations.
+    """
+    if not (username and password):
+        return {"error": "CIRCL PDNS credentials not configured",
+                "domain": domain, "records": [], "count": 0}
+
+    url = f"https://www.circl.lu/pdns/query/{domain}"
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(
+                url,
+                auth=(username, password),
+                headers={"Accept": "application/x-ndjson"},
+            )
+        if r.status_code in (401, 403):
+            return {"error": f"CIRCL PDNS unauthorized (HTTP {r.status_code})",
+                    "domain": domain, "records": [], "count": 0}
+        if r.status_code != 200:
+            return {"error": f"CIRCL HTTP {r.status_code}",
+                    "domain": domain, "records": [], "count": 0}
+
+        import json as _json
+        records: list = []
+        for line in (r.text or "").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            rtype = (row.get("rrtype") or "").upper()
+            if rtype not in ("A", "AAAA"):
+                continue
+            ip = (row.get("rdata") or "").strip()
+            if not ip or not _is_ip(ip):
+                continue
+            records.append({
+                "ip": ip,
+                "first": _normalize_ts(row.get("time_first")),
+                "last":  _normalize_ts(row.get("time_last")
+                                       or row.get("time_first")),
+                "record_type": rtype,
+                "count": int(row.get("count", 0) or 0),
+            })
+        records.sort(key=lambda x: x["last"] or x["first"] or "", reverse=True)
+        return {"domain": domain, "records": records, "count": len(records)}
+    except Exception as e:
+        return {"error": f"CIRCL PDNS failed: {e}",
+                "domain": domain, "records": [], "count": 0}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Mnemonic Argus Passive DNS — historical A/AAAA records with timestamps.
+# Free tier with API key; strong Nordic/EU visibility. Auth via the
+# `Argus-API-Key` header.
+# ────────────────────────────────────────────────────────────────────
+
+async def fetch_mnemonic_pdns(
+    domain: str, api_key: str = "",
+) -> Dict[str, Any]:
+    """Mnemonic Argus Passive DNS query for `domain`. Returns the same shape
+    as fetch_circl_pdns for consistent downstream aggregation."""
+    if not api_key:
+        return {"error": "Mnemonic API key not configured",
+                "domain": domain, "records": [], "count": 0}
+
+    url = (
+        f"https://api.mnemonic.no/pdns/v3/{domain}"
+        f"?aggregateResult=true&rrType=a&rrType=aaaa&limit=500"
+    )
+    headers = {"Argus-API-Key": api_key, "Accept": "application/json"}
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.get(url, headers=headers)
+        if r.status_code in (401, 403):
+            return {"error": f"Mnemonic unauthorized (HTTP {r.status_code})",
+                    "domain": domain, "records": [], "count": 0}
+        if r.status_code != 200:
+            return {"error": f"Mnemonic HTTP {r.status_code}",
+                    "domain": domain, "records": [], "count": 0}
+        data = r.json() or {}
+        records: list = []
+        for row in (data.get("data") or []):
+            rtype = (row.get("rrtype") or "").upper()
+            if rtype not in ("A", "AAAA"):
+                continue
+            ip = (row.get("answer") or "").strip()
+            if not ip or not _is_ip(ip):
+                continue
+            records.append({
+                "ip": ip,
+                "first": _normalize_ts(row.get("firstSeenTimestamp")),
+                "last":  _normalize_ts(row.get("lastSeenTimestamp")
+                                       or row.get("firstSeenTimestamp")),
+                "record_type": rtype,
+                "count": int(row.get("count", 0) or 0),
+            })
+        records.sort(key=lambda x: x["last"] or x["first"] or "", reverse=True)
+        return {"domain": domain, "records": records, "count": len(records)}
+    except Exception as e:
+        return {"error": f"Mnemonic PDNS failed: {e}",
+                "domain": domain, "records": [], "count": 0}
+
+
+# ────────────────────────────────────────────────────────────────────
 # OTX domain → passive-DNS — historical A/AAAA observations with timestamps.
 # Complements fetch_otx_ip_passive_dns (IP→hostnames); this is the inverse
 # and is what powers the HOSTING IP HISTORY panel's "LAST HOSTED" labels for

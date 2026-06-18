@@ -1,6 +1,6 @@
-# CRUCIBLE SIGINT v5.1 - Enhanced Edition
+# CRUCIBLE SIGINT
 
-**Passive OSINT Infrastructure Fingerprinting Engine with Shodan & VirusTotal Integration**
+**Passive OSINT Infrastructure Pivoting Platform — for threat intelligence, fraud investigation, and brand protection.**
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.111%2B-green)
@@ -15,7 +15,7 @@
 
 **The foundational analytical approach in CRUCIBLE is directly inspired by the work of Ryan McDonald** (Principal Security Engineer | USMC 0341).
 
-Ryan published ["Fingerprinting Malicious Infrastructure Using Free Resources"] (LinkedIn, May 2026), documenting his passive pivot of the **DSJ Exchange / BG Wealth Sharing LTD** pig-butchering operation — a $150M cryptocurrency fraud that victimized thousands of people, ultimately traced by FBI Operation Level Up with $41M in stolen funds frozen.
+Ryan published ["Fingerprinting Malicious Infrastructure Using Free Resources"](#) (LinkedIn, May 2026), documenting his passive pivot of the **DSJ Exchange / BG Wealth Sharing LTD** pig-butchering operation — a $150M cryptocurrency fraud that victimized thousands of people, ultimately traced by FBI Operation Level Up with $41M in stolen funds frozen.
 
 Ryan demonstrated — using only free passive sources (crt.sh, urlscan.io, DNS, WHOIS, manual JS inspection) — how a single confirmed-bad domain maps an entire 47-domain criminal infrastructure cluster, identifies on-chain wallet drain mechanisms, and reveals the two-layer brand structure of a large-scale scam operation.
 
@@ -25,188 +25,223 @@ Ryan demonstrated — using only free passive sources (crt.sh, urlscan.io, DNS, 
 
 ## What It Does
 
-CRUCIBLE takes a single seed (domain or IP) and runs a multi-stage passive pipeline:
+CRUCIBLE takes a single seed (domain or IP) and runs a 17-stage passive pipeline. Each stage emits structured events over Server-Sent Events; the UI renders them into dedicated panels, and any high-signal finding (named malware family, threat-actor attribution, suspicious vendor verdict) is elevated to a **CRITICAL FINDINGS** strip above the execution log so it doesn't scroll past.
 
-| Stage | Source | What It Finds |
-|-------|--------|---------------|
-| **01 Cert Transparency** | crt.sh + certspotter | Sister domains, NEIBU admin portals, cert timeline |
-| **02 DNS Resolution** | dns.google (DoH) | A/AAAA/MX/NS/TXT/SOA records, parking indicators |
-| **03 IP Intelligence** | freeipapi.com + ip-api | ASN, ISP, hosting type, proxy/CDN detection |
-| **04 RDAP Registration** | rdap.org | Registrar, creation date, status flags |
-| **05 urlscan.io** | urlscan.io | Historical scan count, additional IPs, ASNs |
-| **06 JS Bundle Scan** | Live domain fetch | MAX_UINT wallet drain, ERC-20/TRC-20, mobileconfig |
-| **07 Threat Score** | All signals | 14-signal weighted composite with confidence rating |
-| **08 Shodan Intelligence** | shodan.io | Open ports, historical IPs, device/server banners |
-| **09 VirusTotal Passive DNS** | virustotal.com | Historical IP resolution, infrastructure changes |
-| **10 Typosquatting Detection** | DNSTwist | Potential brand impersonation domains with risk scoring |
-| **11 SSL Certificate Graph** | crt.sh extended analysis | Certificate issuance patterns, shared infrastructure |
-| **12 Reverse IP Expansion** | HackerTarget API | Neighbor domains, shared hosting patterns |
-| **13 ASN Intelligence** | ipapi.com + local ASN DB | Hosting provider patterns, known malicious ASNs |
-| **14 Social Media Fingerprinting** | Domain name analysis | Social media/content platform presence, content similarity |
-| **15 Cryptocurrency Wallet Intelligence** | Wallet address extraction | Wallet balance aggregation, shared wallet analysis |
-| **16 Recursive Subdomain Discovery** | Wordlist enumeration | Additional subdomains, internal infrastructure |
-| **17 Threat Actor Attribution** | Behavioral fingerprinting | Confidence-weighted attribution suggestions |
-| **18 Automated Revalidation & Change Detection** | Continuous monitoring | Infrastructure decay scoring, change alerts |
+Stages flow sequentially in execution order:
 
-### 16-Signal Threat Scoring Model
+| # | Stage | Source | What It Finds |
+|----|-------|--------|---------------|
+| **S1** | Certificate Transparency | crt.sh + certspotter + certkit | Sister domains, NEIBU admin portals, cert timeline |
+| **S2** | DNS Records | dns.google (DoH) | A/AAAA/MX/NS/TXT/SOA, parking indicators |
+| **S3** | IP Intelligence | freeipapi + ip-api | ASN, ISP, hosting type, proxy/CDN detection |
+| **S4** | ASN Intelligence | ipapi + local ASN DB | Hosting provider patterns, known malicious ASNs |
+| **S5** | RDAP Registration | rdap.org | Registrar, creation date, status flags |
+| **S6** | urlscan.io | urlscan.io | Historical scan count, additional IPs, ASNs |
+| **S7** | JS Bundle Scan | Live domain fetch | MAX_UINT wallet drain, ERC-20/TRC-20, mobileconfig |
+| **S8** | Shodan | shodan.io | Open ports, historical IPs, device/server banners |
+| **S9** | Passive DNS Aggregator | VT + OTX + CIRCL + Mnemonic + self-tracking | Historical IP resolution **with normalized ISO timestamps**, per-source provenance, vendor verdict |
+| **S10** | ThreatFox + OTX Cross-Reference | abuse.ch + OTX | Malware-family attribution, pulse memberships, sister domains |
+| **S11** | Platform Pivots | favicon mmh3 / body hash / JARM / reverse-NS | Shodan + Censys reverse-pivot fingerprints; identical JARMs collapse to one entry with endpoint list |
+| **S12** | Google Threat Intelligence | GTI / Mandiant | Threat actors, campaigns, collections, DNS fallback when live resolution fails |
+| **S13** | Reverse IP Mapping | HackerTarget | Neighbor domains, shared-hosting patterns |
+| **S14** | IOC Correlation | Multi-source | Cross-platform IOC matches |
+| **S15** | SSL Certificate Graph | crt.sh extended | Issuance patterns, shared-infra clusters |
+| **S16** | Social Media Fingerprinting | Domain-name analysis | Social media / content platform presence, content similarity |
+| **S17** | Subdomain Discovery | CT + VT + HTML + DNS brute | Subdomains via four parallel sources, per-domain evidence |
 
-Signals are weighted by investigative value. The highest-weight signals (3.0×) represent direct evidence, not inference:
+After every scan completes, a **DIFF** event compares the run to the most recent prior scan of the same seed and reports added / removed / stable IPs and per-IP source-coverage changes.
 
-| Signal | Weight | What It Detects |
-|--------|--------|-----------------|
-| JS Wallet Drain | 3.0 | MAX_UINT `approve(0xffff...ffff)` in deposit flow |
-| NEIBU Admin Portal | 3.0 | 内部 (internal) subdomains — Chinese-dev admin panel |
-| Known Operation Match | 3.0 | Direct DSJ/BG Wealth infrastructure fingerprint |
-| Scam Naming Pattern | 2.5 | dsj*, ffs*, ge7*, neibu*, suspicious TLDs |
-| Domain Cluster Volume | 2.0 | 10+ domains from CT = scam-kit-as-a-service |
-| Chinese Cloud Infra | 2.0 | Alibaba Cloud SG, Tencent EdgeOne |
-| Typosquatting Detection | 2.0 | Brand impersonation domains with strength scoring |
-| Shannon Entropy | 2.0 | Machine-generated domain clustering |
-| SSL Certificate Graph | 2.0 | Shared infrastructure patterns from certs |
-| Shared Infrastructure | 2.0 | Shared hosting from reverse IP lookup |
-| Social Media Fingerprinting | 2.0 | Social media/content platform presence |
-| CDN Origin Masking | 1.5 | Cloudflare, AWS Global Accelerator |
-| Registrar Risk | 1.5 | gname.com, nicenic (primary scam-kit registrars) |
-| Domain Freshness | 1.5 | Age-based risk (< 30 days = critical) |
-| API Failover Triplet | 1.5 | api.ddjea, api.ddjeb, api.dsjhout patterns |
-| Suspicious Infra | 1.5 | DNS parking, scam hosting ASNs, internal subdomains |
-| Shodan Open Ports | 1.5 | Open services and risky ports |
-| VT Passive DNS | 1.5 | Infrastructure rotation and historical IPs |
-| urlscan Presence | 1.0 | Historical scan count corroboration |
-| Multi-Platform IOC Correlation | 2.5 | External threat intelligence matches |
-| Cryptocurrency Wallet Intelligence | 3.0 | Wallet addresses, balances, shared clusters |
-| Threat Actor Attribution | 2.5 | Behavioral fingerprint matching confidence |
-| Automated Revalidation & Change Detection | 2.5 | Infrastructure decay, takedown effectiveness |
-
-## Installation
-
-**Requirements:** Python 3.10+, 3 packages, API keys for Shodan/VirusTotal (optional but recommended).
-
-```bash
-# 1. Clone
-git clone https://github.com/neatlabs-ai/crucible-sigint.git
-cd crucible-sigint
-
-# 2. Install dependencies
-pip install fastapi uvicorn httpx
-
-# 3. Set up API keys (optional but recommended)
-# See API_KEYS.md for setup instructions
-
-# 4. Run
-python crucible_app.py
-
-# 5. Open
-# http://localhost:8000
-```
-
-The server auto-selects a free port (8000 → 8080 → 8888 → 9000) if your preferred port is in use.
+The pipeline also runs structural-pattern analysis on fetched JS (`crucible.js_compromise_detector`), exposes a YARA retrohunt-rule generator (`crucible.yara_retrohunt_generator`), and provides standalone HTTP endpoints for ad-hoc lookups: `/api/ip/{ip}/hosted-intel`, `/api/gti/{seed}`, `/api/subdomain/{domain}`, `/api/pdns/{domain}`, `/api/diff/{seed}`.
 
 ---
 
-## Five Modes
+## Critical Findings Panel
+
+Every TI source — ThreatFox, OTX pulses, VT vendor verdict, GTI threat-actor attribution, Mandiant assessment — emits structured `finding` events with a severity tier and a permalink. The frontend renders them above the execution log in a sticky panel:
+
+| Severity | Triggered by |
+|----------|--------------|
+| **critical** | Named malware family (Quasar RAT, AsyncRAT, NETSUPPORT…), Mandiant threat-actor attribution, GTI verdict `malicious` with score ≥ 70, VT 5+ malicious vendors |
+| **high** | OTX pulse with malicious tags but no named family, GTI campaign association or Mandiant attribution data, VT 1+ malicious or reputation ≤ −25 |
+| **medium** | VT 3+ suspicious vendors |
+
+Each row carries a `↗ open` link straight to the relevant VT / GTI / OTX permalink for analyst follow-through.
+
+---
+
+## Hosting IP History Panel
+
+Every IP that has ever resolved to the seed is shown with explicit status:
+
+- `● ACTIVE NOW` — currently in DNS
+- `LAST HOSTED YYYY-MM-DD` — historical, with the most-recent observation timestamp from any source
+- `LAST DATE UNKNOWN` — historical, no source carried a timestamp
+
+Per-IP source-provenance chips (`VT` / `OTX` / `URLS` / `LIVE` / `CIRCL` / `MNEM` / `SELF`) show which feed corroborated each observation. **Timestamps are normalised to ISO-8601** at every source boundary so cross-source comparisons work even when VT returns Unix-epoch ints and OTX returns ISO strings.
+
+---
+
+## Multi-Source Passive DNS
+
+S9 aggregates seven distinct sources into the single HOSTING IP HISTORY view. Coverage compounds because the sources have different gaps:
+
+| Source | Coverage strength | Carries timestamps |
+|--------|-------------------|--------------------|
+| **VirusTotal passive DNS** | Global; weak on Cloudflare-Universal-SSL hosts | Yes (Unix epoch, normalised to ISO) |
+| **OTX domain passive DNS** | Decent global; fills VT gaps especially on Cloudflare | Yes (ISO) |
+| **CIRCL.lu passive DNS** | EU sensor network, security-research grade | Yes (Unix epoch, normalised) |
+| **Mnemonic Argus passive DNS** | Nordic / EU visibility | Yes (Unix epoch, normalised) |
+| **urlscan.io** | Anything urlscan crawled | No timestamps per IP |
+| **Live DNS** | Right now, this instant | No (current observation) |
+| **Self-tracking** | Domains *you've* scanned before | Yes (your observation timestamps) |
+
+---
+
+## Self-Tracking Passive DNS
+
+`pdns_store.py` runs a local SQLite index (`crucible_pdns.sqlite` by default; configurable via `CRUCIBLE_PDNS_DB`) that records every `(domain, ip, source, observed_at)` tuple the pipeline sees. Each scan compounds the corpus:
+
+- **Every new scan** writes its observations under a fresh `scan_id`
+- **Every subsequent scan** of the same seed adds the prior observations to its HOSTING IP HISTORY panel (as the `SELF` source)
+- **After a few weeks of use**, Crucible has its own passive-DNS index of the domains *you actually investigate* — closing the long-tail gap external feeds rarely fill
+
+Schema is two tables (`pdns_observations`, `scan_runs`), inserts are idempotent on the `UNIQUE(domain, ip, source, observed_at)` constraint, and queries are exposed at:
+
+```
+GET /api/pdns/{domain}         # aggregated per-IP history + recent scans
+GET /api/diff/{seed}           # diff latest scan vs. previous (or specified prior_scan_id)
+```
+
+---
+
+## Diff Engine
+
+`diff_engine.py` compares two scan-state snapshots from the SQLite store and surfaces what changed:
+
+- **Added IPs** — present in current scan, absent in prior
+- **Removed IPs** — present in prior, absent in current (NXDOMAIN / takedown indicator)
+- **Stable IPs** — present in both
+- **Source-coverage changes per IP** — gained or lost which passive-DNS sources
+
+Diff fires automatically at the end of every pipeline run (an SSE `diff` event + a `DIFF:` log line) when there's a prior completed scan of the same seed. Also available as a standalone endpoint at `/api/diff/{seed}`.
+
+---
+
+## JS Compromise Detector
+
+Standalone module (`js_compromise_detector.py`) that fetches a domain's homepage + first-party scripts and applies ~40 deterministic patterns plus two structural checks (entropy delta, single-line inject) to detect indicators consistent with compromised-website families:
+
+- **SocGholish / FakeUpdates** — document.write loaders, fake-update lure copy
+- **Parrot TDS / NDSW** — ndsw/ndsx variable convention + obfuscation chains
+- **Balada Injector** — WordPress `wp_create_user` calls
+- **ClearFake / EtherHiding** — fake-browser-update overlays + `ethereum.request` + `eth_call`
+- **KongTuke / ClickFix** — `clipboard.writeText` paired with verify-human lures
+- **Keitaro / BlackTDS** — fingerprint-then-redirect, click-tracking parameter conventions
+- **Generic behaviors** — atob+eval chains, `navigator.webdriver` checks, canvas fingerprinting, visitor-gating storage, devtools detection
+
+Composite score gates LLM escalation: only the ambiguous band (`2.0–5.0`) optionally invokes a Protocol-based LLM client; clean and high-confidence verdicts skip the LLM entirely (deterministic, auditable, cheap).
+
+---
+
+## YARA Retrohunt Generator
+
+Companion module (`yara_retrohunt_generator.py`) that converts `triggered_patterns` output from the detector into VirusTotal-retrohunt-compatible YARA rules. For each input pattern, emits two variants:
+
+- **tight** — strict, requires ≥ 2 campaign-specific literals + `filesize < 500KB` structural anchor
+- **loose** — behavioral, requires ≥ 2 total signals (literals + behavioral tokens) + negative anchors against jQuery / React / GA-GTM / fb-pixel / Cloudflare / Stripe / Intercom fingerprints to suppress legit-JS false positives
+
+Each rule carries family attribution inferred from the pattern's tags (parrot-tds → `parrot_tds`, socgholish → `socgholish`, …), Mandiant MITRE ATT&CK references, and a per-rule `expected_volume_estimate` in the returned manifest.
+
+---
+
+## Modes
 
 | Mode | Use Case |
 |------|----------|
-| **Standard** | Full 9-stage pipeline for any suspected domain |
+| **Standard** | Full passive pipeline for a single seed |
 | **Investigator** | Verbose mode, raw API responses in JSON export for LEA referrals |
 | **Phishing / Brand Abuse** | Point at your brand domain, find every lookalike in cert transparency |
 | **Cert Intelligence** | Direct wildcard CT queries with CA distribution and issuance timeline |
 | **Bulk IOC** | Enrich up to 50 domains/IPs at once, export SIEM-ready CSV |
-| **Settings** | Configure API keys and Certificate Transparency sources |
+| **Settings** | API key configuration, CT-source toggles |
 
 ---
 
-## Settings
+## Installation
 
-The **Settings** mode allows you to:
+**Requirements:** Python 3.10+, FastAPI, httpx. API keys optional but recommended — VT/GTI is the single biggest quality lever, and CIRCL + Mnemonic significantly expand passive-DNS coverage.
 
-- Configure API keys for Shodan and VirusTotal to enable enhanced intelligence gathering
-- Choose alternative Certificate Transparency sources to improve reliability when crt.sh is unavailable
-- Test API key configurations to ensure they're working correctly
-- Clear all settings if needed
+```bash
+git clone https://github.com/jacobholtz/crucible-sigint.git
+cd crucible-sigint
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
 
-### API Key Configuration
+# Set API keys (any subset)
+export VIRUSTOTAL_API_KEY="..."      # also unlocks GTI when entitled
+export ALIENVAULT_API_KEY="..."      # OTX pulses + sister-domain pivot
+export ABUSECH_API_KEY="..."         # ThreatFox malware-family attribution
+export SHODAN_API_KEY="..."          # JARM + open-port discovery
+export CIRCL_PDNS_USERNAME="..."     # CIRCL.lu Passive DNS
+export CIRCL_PDNS_PASSWORD="..."
+export MNEMONIC_API_KEY="..."        # Mnemonic Argus Passive DNS
 
-To enable Shodan and VirusTotal integration:
+# Optional: relocate the self-tracking SQLite store
+export CRUCIBLE_PDNS_DB="/path/to/crucible_pdns.sqlite"
 
-1. Sign up for free API keys:
-   - [Shodan.io](https://shodan.io) - 50 free requests per day
-   - [VirusTotal.com](https://virustotal.com) - 500 free requests per day
+python crucible_app.py
+# → http://localhost:8000
+```
 
-2. Enter your API keys in the Settings mode
-3. Click "TEST" to verify they're working correctly
-4. The tools will automatically use them in the Standard pipeline
-
-### Certificate Transparency Alternatives
-
-To improve reliability when crt.sh is unavailable:
-
-1. Enable **CertSpotter** as a fallback (always available)
-2. Optionally configure **Bufferover.run** for additional coverage (requires API key)
-3. The tool will automatically try multiple sources in order of reliability
-
----
-
-## Demo Seeds
-
-These are confirmed domains from documented criminal operations. Run them in Standard mode to see the full pipeline with real data.
-
-| Domain | Operation | What to Expect |
-|--------|-----------|----------------|
-| `exofdsj09.net` | DSJ Exchange / BG Wealth Sharing | 40+ domains, NEIBU portals, gname registrar, Alibaba Cloud |
-| `dsjexchange.com` | DSJ Exchange — trading platform | AWS Global Accelerator masking, fresh domain, known-op match |
-| `bggracefulwealth.com` | BG Wealth Sharing — recruitment layer | Hostinger, DNS parking, two-layer brand structure |
-| `bgwealthalert.com` | BG Wealth Sharing — alert funnel | Recruitment funnel, scam naming pattern |
-| `copypasteandconfirm.com` | DSJ — recruiter instruction domain | Social engineering infrastructure |
-| `wxpass.net` | DSJ — sinkholed domain | Demonstrates post-takedown state |
+API keys can also be updated at runtime from the Settings tab (in-memory for the session). See `API_KEYS.md` for the per-provider signup flow and rate limits.
 
 ---
 
 ## APIs Used
 
-All free. No authentication required. No data leaves your machine.
+All TI sources are passive (no exploit payloads, no active scanning).
 
-| API | Purpose | Limit |
-|-----|---------|-------|
-| [crt.sh](https://crt.sh) | Primary certificate transparency logs | Generous, may be flaky |
-| [certspotter.com](https://sslmate.com/certspotter/api/) | CT fallback | 100 req/hour unauthenticated |
-| [bufferover.run](https://bufferover.run) | Additional CT source (API key required) | 1000 req/day free tier |
-| [freeipapi.com](https://freeipapi.com) | IP enrichment, ASN, hosting | Generous free tier |
-| [dns.google](https://developers.google.com/speed/public-dns/docs/doh) | DNS-over-HTTPS | Unlimited |
-| [rdap.org](https://rdap.org) | Domain registration (WHOIS replacement) | Generous |
-| [urlscan.io](https://urlscan.io/docs/api/) | Historical domain scans | ~1000/day unauthenticated |
-| [shodan.io](https://shodan.io) | Open ports, device/server banners | 50 req/day free tier |
-| [virustotal.com](https://virustotal.com) | Passive DNS, historical IP resolution | 500 req/day free tier |
-| [dnstwist](https://github.com/elceef/dnstwist) | Typosquatting detection | Local tool, no API key required |
+| API | Purpose | Key | Rate Limit |
+|-----|---------|-----|------------|
+| [crt.sh](https://crt.sh) | Primary CT logs | none | Generous, flaky |
+| [certspotter.com](https://sslmate.com/certspotter/api/) | CT fallback + subdomain enum | optional | 100/h unauth |
+| [dns.google](https://developers.google.com/speed/public-dns/docs/doh) | DoH | none | Unlimited |
+| [rdap.org](https://rdap.org) | Domain registration | none | Generous |
+| [freeipapi.com](https://freeipapi.com) | IP/ASN enrichment | none | Generous |
+| [urlscan.io](https://urlscan.io/docs/api/) | Historical domain scans | none | ~1000/day |
+| [shodan.io](https://shodan.io) | Open ports, JARM, banners | required | 50/day free |
+| [virustotal.com](https://virustotal.com) | Passive DNS, reputation, GTI | required | 500/day free |
+| [otx.alienvault.com](https://otx.alienvault.com) | Pulses, passive DNS, domain pDNS | required | Generous |
+| [threatfox.abuse.ch](https://threatfox.abuse.ch) | Malware-family IOC attribution | required (auth key) | Generous |
+| [Google Threat Intelligence](https://www.virustotal.com/gui/intelligence-overview) | Mandiant threat actors, campaigns | requires GTI entitlement on VT key | per VT plan |
+| [circl.lu/pdns](https://www.circl.lu/services/passive-dns/) | EU passive DNS with timestamps | required (basic auth) | Researcher tier |
+| [api.mnemonic.no/pdns/v3](https://docs.mnemonic.no/display/public/API/Passive+DNS+v3+API) | Nordic / EU passive DNS | required | Free tier with key |
+| [hackertarget.com](https://hackertarget.com) | Reverse IP | none | Low (rate-limited) |
+| [Censys](https://search.censys.io) | Favicon / JARM reverse pivot | required | per plan |
+| [dnstwist](https://github.com/elceef/dnstwist) | Typosquatting (local) | none | unlimited |
 
 ---
 
 ## Exports
 
-Every mode exports:
 - **JSON** — full structured report with all signals and raw data
 - **IOC CSV** — domain/IP list, SIEM-ready with source and flag columns
 - **HTML Report** — standalone dark-theme report, no external dependencies
 - **Copy Findings** — plain text for Slack, email, or ticketing systems
 
-All exports support **defang toggle** — IOCs neutralized with `[.]` and `[://]` per TLP conventions before sharing.
-
----
-
-## Themes
-
-Toggle between **dark terminal** (default) and **paper/light** mode using the ☀ button in the top right. Theme preference is saved in localStorage.
+All exports support **defang toggle** — IOCs neutralised with `[.]` and `[://]` per TLP conventions before sharing.
 
 ---
 
 ## Security Design
 
-- **No active probing** — no exploit payloads, no port scans, no authenticated requests
+- **No active probing** — no exploit payloads, no port scans, no authenticated requests against targets
 - **All IOC data rendered as inert text** — `textContent` throughout, no `innerHTML` with external data
-- **Input validation** — strict domain/IP regex before any data reaches the pipeline
+- **Strict input validation** — domain/IP regex before any data reaches the pipeline
 - **Server-side APIs** — no CORS restrictions, no browser sandbox fighting you
 - **Localhost only** — binds to `127.0.0.1`, never exposed to your network
+- **API keys never logged** — runtime updates store keys in memory only; the Settings endpoint only ever returns `_configured` booleans, never key values
+- **Self-tracking store is local** — `crucible_pdns.sqlite` lives next to the source on your machine; nothing is ever uploaded
 
 ---
 
@@ -214,29 +249,44 @@ Toggle between **dark terminal** (default) and **paper/light** mode using the �
 
 ```
 crucible-sigint/
-├── crucible_app.py        # FastAPI backend — all API calls, scoring, SSE pipeline
+├── crucible_app.py                   # FastAPI backend — SSE pipeline, all scoring, route handlers
+├── intelligence_extensions.py        # External TI fetchers (VT, OTX, ThreatFox, GTI, CIRCL, Mnemonic, subdomain enum)
+├── pivot_intel.py                    # Platform-pivot computation (favicon mmh3, body hash, JARM grouping)
+├── infrastructure_timeline.py        # Per-IP infrastructure history tracking
+├── asn_intelligence.py               # ASN-level enrichment, hosting-provider patterns
+├── ioc_correlation_engine.py         # Cross-source IOC correlation
+├── pdns_store.py                     # SQLite self-tracking passive-DNS index
+├── diff_engine.py                    # Scan-to-scan diff (added/removed/stable IPs, source changes)
+├── js_compromise_detector.py         # Standalone: JS compromise pattern analyser
+├── js_compromise_detector_classes.py # Public dataclasses for downstream consumers
+├── yara_retrohunt_generator.py       # Standalone: tight/loose YARA from triggered_patterns
+├── automated_revalidation.py         # Server-side revalidation (UI removed; API retained)
 ├── templates/
-│   └── index.html         # Full frontend — 5 modes, 2 themes, all exports
-├── requirements.txt       # fastapi, uvicorn, httpx
-├── LICENSE                # MIT
+│   └── index.html                    # Full frontend — modes, panels, exports
+├── requirements.txt
+├── LICENSE                           # MIT
 └── README.md
 ```
 
 ---
 
-## Contributing
+## What's New (June 2026)
 
-PRs welcome. The most valuable additions would be:
+This release is a substantial refactor of the original v5.1 pipeline:
 
-- **STIX 2.1 export** — for LEA and ISAC sharing
-- **Re-validation diff engine** — compare two runs, flag what changed (NXDOMAIN, clientHold, new domains)
-
-~~- **Shodan free-tier integration** — open port detection and historical IPs~~ *(IMPLEMENTED)*
-~~- **Additional scam-kit signatures** — extend the known-operation fingerprint database~~ *(IMPLEMENTED)*
-~~- **VirusTotal passive DNS** — surface pre-CDN IPs for Cloudflare-masked domains~~ *(IMPLEMENTED)*
-~~- **Settings page for API key configuration** — easier setup for enhanced intelligence sources~~ *(IMPLEMENTED)*
-~~- **Alternative Certificate Transparency sources** — improve reliability when crt.sh is unavailable~~ *(IMPLEMENTED)*
-~~- **Automated Revalidation & Change Detection** — infrastructure decay scoring and alerts~~ *(IMPLEMENTED)*
+- **Sequential stage numbering** — pipeline now flows S1 → S17 in execution order; no gaps, no duplicates
+- **S9 unified passive-DNS aggregator** — VT + OTX + CIRCL + Mnemonic + self-tracking surface in one panel with per-source provenance and ISO timestamps
+- **CIRCL.lu + Mnemonic integration** — two new external passive-DNS sources, both carrying timestamps; strong EU / Nordic visibility
+- **Self-tracking passive DNS (SQLite)** — Crucible records every observation it makes; future scans compound into a private passive-DNS index
+- **Diff engine** — automatic scan-to-scan comparison at pipeline completion + standalone `/api/diff/{seed}` endpoint
+- **S12 Google Threat Intelligence** — Mandiant threat actors, campaigns, collections; per-relationship querying with graceful fallback; DNS fallback when live resolution fails
+- **CRITICAL FINDINGS panel** — structured-event channel with clickable permalinks; severity-tiered rendering above the execution log
+- **HOSTING IP HISTORY panel** — replaces IP Intelligence; per-IP ACTIVE NOW / LAST HOSTED status with cross-source provenance
+- **JARM fingerprint grouping** — identical fingerprints across an IP's port surface collapse to one row with endpoint list
+- **Date normalisation** — `_normalize_ts()` at every TI source boundary handles Unix-epoch ints, ISO strings, ThreatFox `YYYY-MM-DD HH:MM:SS UTC` format
+- **Subdomain enumeration** — four parallel sources (CT + VT passive DNS + HTML scrape + DNS brute force) with per-subdomain evidence and label-anchored filtering
+- **JS Compromise Detector + YARA Retrohunt Generator** — two new standalone modules for analysing compromised websites and generating downstream YARA hunt rules
+- **Removed** — legacy local threat-actor pattern matcher (S17 in old numbering) was superseded by GTI; revalidation watchlist UI was removed (server-side endpoints retained)
 
 ---
 
@@ -246,15 +296,27 @@ PRs welcome. The most valuable additions would be:
 
 **NEATLABS™** — built as part of the NEATLABS open intelligence tooling initiative. CRUCIBLE joins a portfolio of free practitioner-grade tools at [neatlabs.ai](https://neatlabs.ai).
 
+**Claude (Anthropic)** — the June 2026 refactor (S9 unified passive-DNS aggregator, S10/S11/S12 expansion, CRITICAL FINDINGS surface, HOSTING IP HISTORY redesign, JS Compromise Detector and YARA Retrohunt Generator modules, cross-source date normalisation, JARM grouping, GTI integration fixes, CIRCL + Mnemonic integration, SQLite self-tracking PDNS, diff engine, sequential stage renumbering) was implemented pair-style with Claude Code (Opus 4.7). Architectural direction, validation against live infrastructure, and final review of each change remained with the project author.
+
 ---
 
 ## Author
 
-**Randy B** | Security 360, LLC DBA NEATLABS™  
-28+ years cybersecurity · USAF Veteran · IRS/DoD practitioner  
-[neatlabs.ai](https://neatlabs.ai)  
-
+**Randy B** | Security 360, LLC DBA NEATLABS™
+28+ years cybersecurity · USAF Veteran · IRS/DoD practitioner
+[neatlabs.ai](https://neatlabs.ai)
 
 ---
 
-*CRUCIBLE SIGINT is for authorized security research, threat intelligence, fraud investigation, and brand protection. Use responsibly.*
+## Contributing
+
+PRs welcome. Open questions the project would benefit from:
+
+- **STIX 2.1 export** — for LEA and ISAC sharing
+- **Diff visualisation UI** — render `/api/diff/{seed}` output as an inline panel (currently surfaces as an SSE log line + raw event)
+- **Farsight DNSDB integration** — premium passive-DNS source; gold standard if budget appears
+- **PDNS store retention policy** — currently unbounded; add configurable rolloff / archive for long-running deployments
+
+---
+
+*CRUCIBLE SIGINT is for authorised security research, threat intelligence, fraud investigation, and brand protection. Use responsibly.*
