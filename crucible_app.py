@@ -124,6 +124,12 @@ CIRCL_PDNS_USERNAME = os.environ.get("CIRCL_PDNS_USERNAME", "")
 CIRCL_PDNS_PASSWORD = os.environ.get("CIRCL_PDNS_PASSWORD", "")
 # Mnemonic Argus Passive DNS — Argus-API-Key header.
 MNEMONIC_API_KEY = os.environ.get("MNEMONIC_API_KEY", "")
+# urlscan.io — search works free without a key at a low quota; a key raises it.
+# Used by the Cluster auto-expand to find pages whose HTML contains a tracking ID.
+URLSCAN_API_KEY = os.environ.get("URLSCAN_API_KEY", "")
+# SpyOnWeb — reverse lookup for Google Analytics / AdSense IDs. Free access
+# token required (low quota); without it the SpyOnWeb pivot is skipped cleanly.
+SPYONWEB_API_KEY = os.environ.get("SPYONWEB_API_KEY", "")
 # Google Threat Intelligence (formerly Mandiant Advantage) shares the
 # /api/v3 surface with VirusTotal — GTI entitlement rides on the same key.
 # Whether the relationship fields populate is determined per response by the
@@ -152,6 +158,8 @@ import diff_engine
 from pivot_intel import (fetch_seed_fingerprint, shodan_favicon_pivot,
                           censys_favicon_pivot, fetch_reverse_ns,
                           extract_jarms_from_shodan_results)
+import cache_store
+import cluster_fingerprint as _cluster_fp
 # Import IOC correlation engine
 from ioc_correlation_engine import correlate_iocs_with_threat_feeds, analyze_correlation_results
 
@@ -1304,9 +1312,16 @@ def _findings_from_threatfox(tf_data: dict, *, context_seed: str = "") -> list:
       critical — named malware family (Quasar RAT, AsyncRAT, Cobalt Strike, …)
       high     — threat_type only, no named family (e.g. "botnet_cc")
       (matches without either are skipped — nothing actionable to elevate)
+
+    Matches tagged ``suppressed_shared_cdn`` by S9 are dropped here: they're
+    IP-only hits on anycast CDN ranges (Cloudflare, Akamai, Fastly, …) where
+    the IP is shared across millions of unrelated tenants, so the historic
+    C2 record on that IP is not attributable to the current seed.
     """
     findings = []
     for m in (tf_data.get("matches") or []):
+        if m.get("suppressed_shared_cdn"):
+            continue
         malware = (m.get("malware") or "").strip()
         threat_type = (m.get("threat_type") or "").strip()
         ioc = m.get("ioc") or ""
@@ -1963,22 +1978,53 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
         yield sse("log", {"msg": f"S9: ThreatFox seed-side terms: exact={threatfox_seed_terms[0]} + brand={threatfox_seed_terms[1]} (substring-match for sister subdomains)", "type": "info", "stage":"S9"})
     try:
         tf_data = await fetch_threatfox(threatfox_seed_terms, ip_pool, ABUSECH_API_KEY)
+        # Suppress IP-only ThreatFox hits against shared anycast CDN ranges
+        # (Cloudflare 188.114.96.0/22 et al). The historic C2 record at e.g.
+        # 188.114.97.3:4782 is for *some other* Cloudflare tenant; the current
+        # seed inherits the IP only because Cloudflare anycast routes every
+        # fronted domain to those same edges. Without this guard, every
+        # CF-fronted seed would surface phantom "Quasar RAT" findings.
+        cdn_ips = {
+            str(a.get("ip")) for a in (result.get("asn_data") or [])
+            if any(p in (f"{a.get('asn_string','')} {a.get('asn_name','')} {a.get('organization','')}").lower()
+                   for p in _CDN_PROVIDERS)
+        }
+        suppressed = 0
+        if cdn_ips:
+            for m in (tf_data.get("matches") or []):
+                matched_by = m.get("matched_by") or []
+                # Only IP-only hits are unsafe on shared infra; if the seed
+                # itself also matched, the link is legitimate.
+                if "seed" in matched_by or "ip" not in matched_by:
+                    continue
+                ioc_ip = (m.get("ioc") or "").split(":", 1)[0].strip()
+                if ioc_ip in cdn_ips:
+                    m["suppressed_shared_cdn"] = True
+                    suppressed += 1
+            if suppressed:
+                yield sse("log", {"msg": f"S9: Suppressed {suppressed} ThreatFox IP-only match(es) on shared anycast CDN range — historic C2 record at that IP is not attributable to this seed", "type": "info", "stage":"S9"})
         result["threatfox"] = tf_data
         if tf_data.get("error") and not tf_data.get("matches"):
             yield sse("log", {"msg": f"S9: ThreatFox: {tf_data['error']}", "type": "warn", "stage":"S9"})
         else:
-            n = len(tf_data.get("matches") or [])
+            all_matches = tf_data.get("matches") or []
+            attributable = [m for m in all_matches if not m.get("suppressed_shared_cdn")]
+            n = len(attributable)
             sh, ih = tf_data.get("seed_hits", 0), tf_data.get("ip_hits", 0)
             if n:
-                yield sse("log", {"msg": f"S9: ThreatFox matched {n} IOC{'s' if n!=1 else ''} ({sh} via seed, {ih} via IPs)", "type": "warn", "stage":"S9"})
-                # Log the top few so they show in the live stream
-                for row in (tf_data["matches"] or [])[:8]:
+                yield sse("log", {"msg": f"S9: ThreatFox matched {n} attributable IOC{'s' if n!=1 else ''} ({sh} via seed, {ih} via IPs)", "type": "warn", "stage":"S9"})
+                # Log the top few so they show in the live stream — only the
+                # attributable ones; the suppressed-shared-CDN matches were
+                # already accounted for in the suppression log line above.
+                for row in attributable[:8]:
                     fam = row.get("malware") or row.get("threat_type") or "?"
                     yield sse("log", {"msg": f"S9: ThreatFox: {row.get('ioc')}  [{row.get('ioc_type','?')}]  {fam}  last={row.get('last_seen') or '?'}", "type": "warn", "stage":"S9"})
                 # Elevate named-family / threat-type matches as structured findings
                 # so they render prominently above the log instead of scrolling past.
                 for f in _findings_from_threatfox(tf_data, context_seed=seed):
                     yield sse("finding", f)
+            elif all_matches:
+                yield sse("log", {"msg": f"S9: ThreatFox returned {len(all_matches)} hit(s) but all were on shared-CDN IPs — nothing attributable to this seed", "type": "info", "stage":"S9"})
             else:
                 yield sse("log", {"msg": "S9: ThreatFox returned no matches for seed or resolved IPs", "type": "info", "stage":"S9"})
             yield sse("threatfox", tf_data)
@@ -2649,6 +2695,124 @@ async def pipeline_standard(
         media_type="text/event-stream",
         headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
 
+
+async def _collect_pipeline_result(seed: str, ct: set[str], feats: set[str]) -> dict:
+    """Drain run_standard_pipeline's SSE stream and return the dict it carries
+    in its terminal ``event: complete`` frame. Used by the cluster route as a
+    pipeline_runner so the cluster module never has to know about SSE."""
+    async for chunk in run_standard_pipeline(seed, ct, feats):
+        if not chunk.startswith("event: complete\n"):
+            continue
+        # Frame layout: "event: complete\ndata: {json}\n\n"
+        try:
+            data_line = chunk.split("\n", 2)[1]
+            payload = json.loads(data_line[len("data: "):])
+        except Exception:
+            return {}
+        return payload.get("result") or {}
+    return {}
+
+
+@app.post("/api/cluster/fingerprint")
+async def cluster_fingerprint_route(body: dict = Body(...)):
+    """Cluster fingerprint: given N seeds, return the most discriminating
+    characteristics they share so the analyst can pivot to undiscovered
+    infrastructure. Per-seed pipeline results are cached for ``ttl_hours``."""
+    seeds_in = body.get("seeds") or []
+    if isinstance(seeds_in, str):
+        seeds_in = [s for s in re.split(r"[\s,]+", seeds_in) if s]
+    if not isinstance(seeds_in, list) or not seeds_in:
+        return JSONResponse({"error": "Provide a non-empty 'seeds' list"}, status_code=400)
+    if len(seeds_in) < 2:
+        return JSONResponse({"error": "Need at least 2 seeds to cluster"}, status_code=400)
+    if len(seeds_in) > 25:
+        return JSONResponse({"error": "Cluster capped at 25 seeds per request"}, status_code=400)
+
+    try:
+        ttl_hours = float(body.get("ttl_hours", 24.0))
+    except (TypeError, ValueError):
+        ttl_hours = 24.0
+    ttl_hours = max(0.0, min(ttl_hours, 24.0 * 30))
+
+    def _csv(v, default):
+        if v is None: return set(default)
+        if isinstance(v, list): return {str(x).strip() for x in v if str(x).strip()}
+        return {s.strip() for s in str(v).split(",") if s.strip()}
+
+    ct = _csv(body.get("ct_sources"), set(DEFAULT_CT_SOURCES))
+    feats = _csv(body.get("features"), {
+        "reverse_ip","asn_intel","ssl_graph","timeline","correlation",
+        "social_fingerprint","subdomain_discovery","revalidation"})
+
+    valid: list[str] = []
+    dropped: list[str] = []
+    for s in seeds_in:
+        v, kind = validate_seed(str(s))
+        if v and kind in ("domain", "ip"):
+            valid.append(v)
+        else:
+            dropped.append(str(s))
+    if not valid:
+        return JSONResponse({"error": "No valid seeds", "dropped_seeds": dropped}, status_code=400)
+
+    settings_hash = cache_store.settings_key(ct, feats)
+
+    async def runner(seed: str) -> dict:
+        return await _collect_pipeline_result(seed, ct, feats)
+
+    out = await _cluster_fp.cluster_fingerprint(
+        valid, runner,
+        cache_ttl_hours=ttl_hours,
+        settings_hash=settings_hash,
+        max_concurrency=2,
+    )
+    out["dropped_seeds"] = dropped
+    out["cache_stats"] = cache_store.stats()
+    return JSONResponse(out)
+
+
+@app.post("/api/cluster/expand")
+async def cluster_expand_route(body: dict = Body(...)):
+    """Auto-pivot on the top-ranked shared features from a cluster run to
+    surface additional candidate hosts in the same campaign. Designed to be
+    called with the ``ranked`` + ``seeds`` from a prior /api/cluster/fingerprint
+    response so the analyst stays in control of API spend (button click, not
+    automatic)."""
+    ranked = body.get("ranked") or []
+    if not isinstance(ranked, list) or not ranked:
+        return JSONResponse({"error": "Provide a non-empty 'ranked' list from /api/cluster/fingerprint"},
+                            status_code=400)
+
+    exclude = body.get("exclude_seeds") or body.get("seeds") or []
+    if not isinstance(exclude, list):
+        exclude = []
+
+    try:
+        max_features = int(body.get("max_features", 5))
+    except (TypeError, ValueError):
+        max_features = 5
+    max_features = max(1, min(max_features, 10))
+
+    try:
+        per_feature_cap = int(body.get("per_feature_cap", 2000))
+    except (TypeError, ValueError):
+        per_feature_cap = 2000
+    per_feature_cap = max(50, min(per_feature_cap, 20000))
+
+    out = await _cluster_fp.expand_cluster(
+        ranked,
+        exclude_hosts=exclude,
+        shodan_key=SHODAN_API_KEY or "",
+        censys_id=CENSYS_API_ID or "",
+        censys_secret=CENSYS_API_SECRET or "",
+        urlscan_key=URLSCAN_API_KEY or "",
+        spyonweb_key=SPYONWEB_API_KEY or "",
+        max_features=max_features,
+        per_feature_cap=per_feature_cap,
+    )
+    return JSONResponse(out)
+
+
 @app.get("/api/dns")
 async def api_dns(domain: str = Query(...), types: str = Query("A,AAAA,MX,NS,TXT,CNAME,SOA,CAA")):
     validated, kind = validate_seed(domain)
@@ -3148,6 +3312,22 @@ async def update_certspotter_key(key: str = Body(..., embed=True)):
     global CERTSPOTTER_API_KEY
     CERTSPOTTER_API_KEY = key
     return JSONResponse({"status": "success", "message": "Cert Spotter API key updated"})
+
+@app.post("/api/settings/urlscan")
+async def update_urlscan_key(key: str = Body(..., embed=True)):
+    """Update urlscan.io API key — raises tracking-ID search quota for the
+    Cluster auto-expand."""
+    global URLSCAN_API_KEY
+    URLSCAN_API_KEY = key
+    return JSONResponse({"status": "success", "message": "urlscan.io API key updated"})
+
+@app.post("/api/settings/spyonweb")
+async def update_spyonweb_key(key: str = Body(..., embed=True)):
+    """Update SpyOnWeb access token — enables Analytics/AdSense ID reverse
+    lookup in the Cluster auto-expand."""
+    global SPYONWEB_API_KEY
+    SPYONWEB_API_KEY = key
+    return JSONResponse({"status": "success", "message": "SpyOnWeb access token updated"})
 
 @app.post("/api/settings/ctprovider/{name}")
 async def update_ct_provider(name: str, key: str = Body("", embed=True), url: str = Body("", embed=True)):

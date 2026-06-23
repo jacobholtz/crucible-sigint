@@ -802,6 +802,7 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
   <button class="tab" onclick="switchMode('phishing')">PHISHING / BRAND ABUSE</button>
   <button class="tab" onclick="switchMode('cert')">CERT INTELLIGENCE</button>
   <button class="tab" onclick="switchMode('bulk')">BULK IOC</button>
+  <button class="tab" onclick="switchMode('cluster')">CLUSTER FINGERPRINT</button>
   <button class="tab" onclick="switchMode('settings')">SETTINGS</button>
 </div>
 
@@ -1066,6 +1067,74 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
   </div>
 </div>
 
+<!-- ══ CLUSTER FINGERPRINT MODE ══ -->
+<div class="mode" id="mode-cluster">
+  <div style="background:rgba(80,255,200,.04);border:1px solid var(--cyan-dim);border-left:3px solid var(--cyan);padding:10px 16px;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.7;">
+    <strong style="color:var(--cyan);">CLUSTER FINGERPRINT</strong> — paste N seeds you believe belong to the same campaign. CRUCIBLE runs the standard pipeline on each (results cached per the TTL below) and ranks the most discriminating characteristic they share — favicon, body hash, JARM, tracking ID, name servers, cert org, etc. The top row is your strongest pivot to undiscovered infrastructure.
+  </div>
+  <div class="ipanel" data-lbl="CLUSTER SEEDS">
+    <div class="ilabel">// 2–25 SEEDS — ONE PER LINE — DOMAINS OR IPs FROM THE SAME SUSPECTED CAMPAIGN</div>
+    <textarea class="seed" id="clusterInput" style="padding:10px 12px;min-height:120px;" placeholder="avsvmcloud.com&#10;deftsecurity.com&#10;highdataaccess.com&#10;freescanonline.com" spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+    <div style="margin-top:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+      <button class="btn" id="clusterBtn" onclick="startCluster()" style="padding:9px 18px;">RANK SHARED FEATURES</button>
+      <label style="font-family:var(--mono);font-size:10px;color:var(--text-dim);display:flex;align-items:center;gap:6px;">
+        CACHE TTL
+        <input type="number" id="clusterTtl" value="24" min="0" max="720" step="1"
+               style="width:64px;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);color:var(--cyan);font-family:var(--mono);font-size:11px;padding:4px 6px;outline:none;">
+        HOURS
+      </label>
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-muted);">Re-using a seed within TTL skips its API calls · 0 = always fresh</span>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-hdr"><div class="log-title">CLUSTER LOG</div><span id="clusterProg" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);">READY</span></div>
+    <div class="log-body" id="clusterLog"><div class="ll info"><span class="lts">──:──:──</span><span class="lst">[READY]</span><span class="lm">Paste seeds. Each fresh seed runs the full standard pipeline (~30s); cached seeds return instantly.</span></div></div>
+  </div>
+
+  <div class="rpanel" id="clusterSeedPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>SEEDS PROCESSED</div><div class="pcount" id="clusterSeedCount">0</div></div>
+    <div class="pbody" id="clusterSeedBody" style="padding:0;"></div>
+  </div>
+
+  <div class="rpanel" id="clusterRankPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>RANKED SHARED CHARACTERISTICS — STRONGEST PIVOT FIRST</div><div class="pcount" id="clusterRankCount">0</div></div>
+    <div class="pbody" id="clusterRankBody" style="padding:0;"></div>
+  </div>
+
+  <div id="clusterExpandBar" style="display:none;margin-bottom:10px;padding:10px 14px;background:rgba(255,170,0,.05);border:1px solid var(--amber-dim);border-left:3px solid var(--amber);font-family:var(--mono);font-size:10px;color:var(--text-dim);">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
+      <strong style="color:var(--amber);">AUTO-PIVOT</strong>
+      <span>Query the top features through Shodan / Censys / crt.sh / HackerTarget to surface candidate hosts in the same campaign.</span>
+      <span style="flex:1;"></span>
+      <label style="display:flex;align-items:center;gap:5px;">TOP
+        <input type="number" id="clusterMaxFeat" value="5" min="1" max="10" step="1"
+               style="width:48px;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--amber-dim);color:var(--amber);font-family:var(--mono);font-size:10px;padding:3px 5px;outline:none;">
+        FEATURES
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;">CAP
+        <input type="number" id="clusterCap" value="2000" min="50" max="20000" step="50"
+               style="width:72px;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--amber-dim);color:var(--amber);font-family:var(--mono);font-size:10px;padding:3px 5px;outline:none;">
+        HITS/FEATURE
+      </label>
+      <button class="btn" id="clusterExpandBtn" onclick="expandCluster()" style="padding:7px 16px;">EXPAND CLUSTER ↗</button>
+    </div>
+    <div style="margin-top:6px;font-size:9px;color:var(--text-muted);">
+      Cost-control: features that return more than CAP hits are dropped (a sign they were actually generic, e.g. shared-CDN favicon). Non-API features like body hash / tracking ID remain in the rank table above for manual pivoting.
+    </div>
+  </div>
+
+  <div class="rpanel" id="clusterCandPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>EXPANSION CANDIDATES — HOSTS LIKELY IN THE SAME CAMPAIGN</div><div class="pcount" id="clusterCandCount">0</div></div>
+    <div id="clusterPivotMeta" style="padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;color:var(--text-muted);"></div>
+    <div class="pbody" id="clusterCandBody" style="padding:0;"></div>
+  </div>
+
+  <div class="ebar" id="ebarCluster" style="display:none;">
+    <div class="erow"><button class="ebtn primary" onclick="exportClusterJSON()">EXPORT JSON</button></div>
+  </div>
+</div>
+
 <!-- ══ SETTINGS MODE ══ -->
 <div class="mode" id="mode-settings">
   <div class="ipanel" data-lbl="API KEY CONFIGURATION">
@@ -1174,6 +1243,19 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
         <input type="password" class="set-input" id="certspotterApiKey" placeholder="Cert Spotter API key (optional — raises rate limits)" onchange="saveApiKey('certspotter', this.value)">
       </div>
       <div class="set-status" id="certspotterStatus">No key — using free unauthenticated tier.</div>
+    </div>
+
+    <div class="set-sec">
+      <div class="set-h">Cluster Auto-Expand Sources</div>
+      <div class="set-desc">Used only by the <strong style="color:var(--cyan);">CLUSTER FINGERPRINT → EXPAND CLUSTER</strong> auto-pivot. urlscan searches the public scan corpus for pages whose HTML contains a tracking ID; SpyOnWeb does reverse Google Analytics / AdSense lookups. Both are optional — urlscan works keyless at a low rate, SpyOnWeb is skipped cleanly without a token. AnalyzeID is not wired in (no documented public API).</div>
+      <div class="set-row" style="margin-top:10px;">
+        <input type="password" class="set-input" id="urlscanApiKey" placeholder="urlscan.io API key (optional — raises search quota)" onchange="saveApiKey('urlscan', this.value)">
+      </div>
+      <div class="set-status" id="urlscanStatus">No key — using free anonymous tier.</div>
+      <div class="set-row" style="margin-top:10px;">
+        <input type="password" class="set-input" id="spyonwebApiKey" placeholder="SpyOnWeb access token (required for SpyOnWeb pivots)" onchange="saveApiKey('spyonweb', this.value)">
+      </div>
+      <div class="set-status" id="spyonwebStatus">Not configured — SpyOnWeb pivot will be skipped.</div>
     </div>
 
     <div class="set-sec">
@@ -1330,10 +1412,9 @@ function loadPhishAndClose(domain){document.getElementById('phishSeed').value=do
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeShotLightbox();closeHelp();closeWalletModal();closeDomainModal();}});
 
 function switchMode(m){
-  document.querySelectorAll('.tab').forEach((t,i)=>{const modes=['standard','investigator','phishing','cert','bulk','reval','settings'];t.classList.toggle('active',modes[i]===m);});
+  document.querySelectorAll('.tab').forEach((t,i)=>{const modes=['standard','investigator','phishing','cert','bulk','cluster','settings'];t.classList.toggle('active',modes[i]===m);});
   document.querySelectorAll('.mode').forEach(p=>p.classList.remove('active'));
   document.getElementById('mode-'+m)?.classList.add('active');
-  if(m==='reval')updateRevalAvailability();
 }
 function setChip(id,state){const c=document.getElementById('chip-'+id);if(!c)return;c.classList.remove('live','fail','pend');if(state)c.classList.add(state);updateChipsSummary();}
 
@@ -3811,6 +3892,8 @@ function loadSettings() {
   const abEl=document.getElementById('abusechApiKey');if(abEl)abEl.value=loadApiKey('abusech');
   document.getElementById('censysApiKey').value = loadApiKey('censys');
   const csk=document.getElementById('certspotterApiKey');if(csk)csk.value=loadApiKey('certspotter');
+  const usk=document.getElementById('urlscanApiKey');if(usk)usk.value=loadApiKey('urlscan');
+  const spk=document.getElementById('spyonwebApiKey');if(spk)spk.value=loadApiKey('spyonweb');
 
   // Load CT source toggles (free built-in sources)
   document.getElementById('useCertSpotter').checked = loadCtSetting('certspotter');
@@ -3914,6 +3997,259 @@ function tagPivotColumns(){
   const right = document.getElementById('stdColRight');
   if(left)  [...left.querySelectorAll(':scope > .rpanel')].forEach(p => { p.dataset.pivotCol = 'left'; });
   if(right) [...right.querySelectorAll(':scope > .rpanel')].forEach(p => { p.dataset.pivotCol = 'right'; });
+}
+
+// ════════════════════════════════
+// CLUSTER FINGERPRINT
+// ════════════════════════════════
+let clusterData=null;
+const clusterLog=(m,t,s)=>logTo('clusterLog',m,t,s);
+
+async function startCluster(){
+  const ta=document.getElementById('clusterInput');
+  const seeds=(ta.value||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  if(seeds.length<2){clusterLog('Need at least 2 seeds to cluster.','err','VALIDATION');return;}
+  if(seeds.length>25){clusterLog(`Capped at 25 seeds (got ${seeds.length}).`,'err','VALIDATION');return;}
+  const ttlRaw=parseFloat(document.getElementById('clusterTtl').value);
+  const ttl=isFinite(ttlRaw)&&ttlRaw>=0?ttlRaw:24;
+
+  const btn=document.getElementById('clusterBtn');
+  const prog=document.getElementById('clusterProg');
+  btn.disabled=true;btn.textContent='RUNNING…';
+  prog.textContent=`0 / ${seeds.length}`;prog.style.color='var(--amber)';
+  clusterLog(`Cluster run: ${seeds.length} seed(s), TTL=${ttl}h — fresh seeds run the full pipeline, cached seeds return instantly.`,'live','START');
+
+  document.getElementById('clusterSeedPanel').style.display='none';
+  document.getElementById('clusterRankPanel').style.display='none';
+  document.getElementById('clusterExpandBar').style.display='none';
+  document.getElementById('clusterCandPanel').style.display='none';
+  document.getElementById('ebarCluster').style.display='none';
+
+  try{
+    const r=await fetch('/api/cluster/fingerprint',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({seeds, ttl_hours: ttl}),
+    });
+    const data=await r.json();
+    if(!r.ok){clusterLog('Server error: '+(data.error||r.status),'err','HTTP');return;}
+    clusterData=data;
+    renderClusterSeeds(data);
+    renderClusterRanked(data);
+    document.getElementById('ebarCluster').style.display='';
+    const hits=(data.seeds||[]).filter(s=>s.cache_hit).length;
+    clusterLog(`Done: ${data.seeds?.length||0} seeds (${hits} cache hit, ${(data.seeds?.length||0)-hits} fresh) · ${data.ranked?.length||0} shared feature(s) ranked.`,'ok','DONE');
+    prog.textContent=`${data.seeds?.length||0} / ${seeds.length}`;prog.style.color='var(--green)';
+  }catch(e){
+    clusterLog('Cluster request failed: '+e.message,'err','NET');
+  }finally{
+    btn.disabled=false;btn.textContent='RANK SHARED FEATURES';
+  }
+}
+
+function renderClusterSeeds(data){
+  const body=document.getElementById('clusterSeedBody');
+  const count=document.getElementById('clusterSeedCount');
+  body.textContent='';
+  const seeds=data.seeds||[];
+  count.textContent=String(seeds.length);
+  const dropped=data.dropped_seeds||[];
+
+  const tbl=document.createElement('table');
+  tbl.style.cssText='width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;';
+  tbl.innerHTML='<thead><tr style="background:var(--bg2);color:var(--text-dim);">'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">SEED</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);width:90px;">CACHE</th>'+
+    '<th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);width:120px;">FEATURES</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">NOTES</th>'+
+    '</tr></thead>';
+  const tb=document.createElement('tbody');
+  seeds.forEach(s=>{
+    const tr=document.createElement('tr');
+    tr.style.borderBottom='1px solid var(--border)';
+    const tdSeed=document.createElement('td');tdSeed.style.cssText='padding:7px 12px;color:var(--cyan);';tdSeed.textContent=s.seed||'?';
+    const tdCache=document.createElement('td');tdCache.style.padding='7px 12px';
+    const badge=document.createElement('span');
+    badge.style.cssText=`display:inline-block;padding:2px 7px;font-size:9px;border:1px solid ${s.cache_hit?'var(--green)':'var(--amber-dim)'};color:${s.cache_hit?'var(--green)':'var(--amber)'};`;
+    badge.textContent=s.cache_hit?'HIT':'FRESH';
+    tdCache.appendChild(badge);
+    if(s.cache_hit&&s.cached_at){
+      const ago=Math.round((Date.now()/1000-s.cached_at)/3600*10)/10;
+      const small=document.createElement('span');small.style.cssText='color:var(--text-muted);margin-left:6px;font-size:9px;';
+      small.textContent=`${ago}h ago`;tdCache.appendChild(small);
+    }
+    const tdFeat=document.createElement('td');tdFeat.style.cssText='padding:7px 12px;text-align:right;color:var(--text-dim);';tdFeat.textContent=String(s.feature_count||0);
+    const tdNote=document.createElement('td');tdNote.style.cssText='padding:7px 12px;color:var(--red);font-size:9px;';tdNote.textContent=s.error?String(s.error).slice(0,80):'';
+    tr.appendChild(tdSeed);tr.appendChild(tdCache);tr.appendChild(tdFeat);tr.appendChild(tdNote);
+    tb.appendChild(tr);
+  });
+  if(dropped.length){
+    dropped.forEach(d=>{
+      const tr=document.createElement('tr');tr.style.borderBottom='1px solid var(--border)';
+      const td1=document.createElement('td');td1.style.cssText='padding:7px 12px;color:var(--text-muted);text-decoration:line-through;';td1.textContent=d;
+      const td2=document.createElement('td');td2.colSpan=3;td2.style.cssText='padding:7px 12px;color:var(--red);font-size:9px;';td2.textContent='dropped — invalid domain/IP';
+      tr.appendChild(td1);tr.appendChild(td2);tb.appendChild(tr);
+    });
+  }
+  tbl.appendChild(tb);body.appendChild(tbl);
+  document.getElementById('clusterSeedPanel').style.display='';
+}
+
+function renderClusterRanked(data){
+  const body=document.getElementById('clusterRankBody');
+  const count=document.getElementById('clusterRankCount');
+  body.textContent='';
+  const ranked=data.ranked||[];
+  count.textContent=String(ranked.length);
+  if(!ranked.length){
+    const empty=document.createElement('div');empty.className='empty';empty.style.padding='24px';
+    empty.textContent='No shared characteristics — these seeds may not belong to the same campaign, or the shared signals were too generic (CDN, Let’s Encrypt, etc.) to be useful pivots.';
+    body.appendChild(empty);
+    document.getElementById('clusterRankPanel').style.display='';
+    return;
+  }
+  const tbl=document.createElement('table');
+  tbl.style.cssText='width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;';
+  tbl.innerHTML='<thead><tr style="background:var(--bg2);color:var(--text-dim);">'+
+    '<th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);width:40px;">#</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);width:160px;">CLASS</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">VALUE</th>'+
+    '<th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);width:110px;">COVERAGE</th>'+
+    '<th style="text-align:right;padding:8px 12px;border-bottom:1px solid var(--border);width:70px;">SCORE</th>'+
+    '<th style="text-align:center;padding:8px 12px;border-bottom:1px solid var(--border);width:90px;">PIVOT</th>'+
+    '</tr></thead>';
+  const tb=document.createElement('tbody');
+  const N=(data.seeds||[]).length||1;
+  ranked.forEach((r,i)=>{
+    const tr=document.createElement('tr');tr.style.borderBottom='1px solid var(--border)';
+    if(i===0)tr.style.background='rgba(80,255,200,.04)';
+    const rank=document.createElement('td');rank.style.cssText='padding:7px 12px;text-align:right;color:var(--text-muted);';rank.textContent=String(i+1);
+    const cls=document.createElement('td');cls.style.cssText='padding:7px 12px;color:var(--purple);';cls.textContent=r.class;
+    const val=document.createElement('td');val.style.cssText='padding:7px 12px;color:var(--cyan);font-family:var(--mono);word-break:break-all;';
+    const v=String(r.value||'');val.textContent=v.length>80?v.slice(0,77)+'…':v;val.title=v;
+    const cov=document.createElement('td');cov.style.cssText='padding:7px 12px;text-align:right;color:var(--text-dim);';
+    cov.textContent=`${r.count}/${N} · ${Math.round(r.coverage*100)}%`;
+    const sc=document.createElement('td');sc.style.cssText='padding:7px 12px;text-align:right;color:var(--amber);font-weight:bold;';sc.textContent=String(r.score);
+    const pv=document.createElement('td');pv.style.cssText='padding:7px 12px;text-align:center;';
+    if(r.pivot_url){
+      const a=document.createElement('a');a.href=r.pivot_url;a.target='_blank';a.rel='noopener noreferrer';
+      a.textContent='OPEN ↗';
+      a.style.cssText='display:inline-block;padding:3px 9px;border:1px solid var(--cyan-dim);color:var(--cyan);text-decoration:none;font-size:9px;';
+      pv.appendChild(a);
+    }else{pv.textContent='—';pv.style.color='var(--text-muted)';}
+    tr.appendChild(rank);tr.appendChild(cls);tr.appendChild(val);tr.appendChild(cov);tr.appendChild(sc);tr.appendChild(pv);
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);body.appendChild(tbl);
+  document.getElementById('clusterRankPanel').style.display='';
+
+  // Surface the expand bar once we have at least one pivotable feature in
+  // the rank. If everything ranks as body-hash / tracking-ID etc. there's
+  // nothing the auto-pivot can do.
+  const PIVOTABLE = new Set(['favicon_hash','jarm','cert_san_pattern','nameservers']);
+  const hasPivotable = ranked.some(r => PIVOTABLE.has(r.class));
+  document.getElementById('clusterExpandBar').style.display = hasPivotable ? '' : 'none';
+}
+
+async function expandCluster(){
+  if(!clusterData?.ranked?.length){clusterLog('No ranked features to expand from.','err','EXPAND');return;}
+  const btn=document.getElementById('clusterExpandBtn');
+  const maxFeat=parseInt(document.getElementById('clusterMaxFeat').value,10)||5;
+  const cap=parseInt(document.getElementById('clusterCap').value,10)||2000;
+  btn.disabled=true;btn.textContent='PIVOTING…';
+  clusterLog(`Auto-pivot: top ${maxFeat} pivotable features · per-feature cap ${cap}.`,'live','EXPAND');
+
+  document.getElementById('clusterCandPanel').style.display='none';
+  try{
+    const r=await fetch('/api/cluster/expand',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        ranked: clusterData.ranked,
+        exclude_seeds: (clusterData.seeds||[]).map(s=>s.seed),
+        max_features: maxFeat,
+        per_feature_cap: cap,
+      }),
+    });
+    const data=await r.json();
+    if(!r.ok){clusterLog('Expand failed: '+(data.error||r.status),'err','EXPAND');return;}
+    clusterData.expansion=data;
+    renderClusterCandidates(data);
+    const strong=(data.candidates||[]).filter(c=>c.strength==='strong').length;
+    clusterLog(`Expansion: ${data.candidates?.length||0} candidates (${strong} strong, ${(data.candidates?.length||0)-strong} leads) · ${data.skipped_features?.length||0} feature(s) skipped.`,'ok','EXPAND');
+  }catch(e){
+    clusterLog('Expand request failed: '+e.message,'err','NET');
+  }finally{
+    btn.disabled=false;btn.textContent='EXPAND CLUSTER ↗';
+  }
+}
+
+function renderClusterCandidates(data){
+  const body=document.getElementById('clusterCandBody');
+  const count=document.getElementById('clusterCandCount');
+  const meta=document.getElementById('clusterPivotMeta');
+  body.textContent='';meta.textContent='';
+  const cands=data.candidates||[];
+  count.textContent=String(cands.length);
+
+  const piv=(data.pivoted_features||[]).map(p=>`${p.class}=${p.value.slice(0,18)}${p.value.length>18?'…':''} (${p.contributed}/${p.total||p.returned})`);
+  const skipped=(data.skipped_features||[]).map(s=>`${s.class}=${(s.value||'').slice(0,18)} — ${s.reason}`);
+  const lines=[];
+  if(piv.length) lines.push('Pivoted: '+piv.join(' · '));
+  if(skipped.length) lines.push('Skipped: '+skipped.join(' · '));
+  meta.textContent=lines.join(' || ')||'No pivots ran.';
+  meta.style.color=skipped.length?'var(--amber)':'var(--text-muted)';
+
+  if(!cands.length){
+    const empty=document.createElement('div');empty.className='empty';empty.style.padding='24px';
+    empty.textContent='No new candidates surfaced. The pivots either returned only the seeds themselves, were skipped for being too generic, or hit an API auth/quota error (see log).';
+    body.appendChild(empty);
+    document.getElementById('clusterCandPanel').style.display='';
+    return;
+  }
+
+  const tbl=document.createElement('table');
+  tbl.style.cssText='width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;';
+  tbl.innerHTML='<thead><tr style="background:var(--bg2);color:var(--text-dim);">'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);width:80px;">STRENGTH</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">HOST</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">MATCHED FEATURES</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);width:180px;">SOURCES</th>'+
+    '</tr></thead>';
+  const tb=document.createElement('tbody');
+  cands.forEach(c=>{
+    const tr=document.createElement('tr');tr.style.borderBottom='1px solid var(--border)';
+    if(c.strength==='strong')tr.style.background='rgba(80,255,200,.04)';
+    const tdStr=document.createElement('td');tdStr.style.padding='7px 12px';
+    const strong=c.strength==='strong';
+    const badge=document.createElement('span');
+    badge.style.cssText=`display:inline-block;padding:2px 8px;font-size:9px;border:1px solid ${strong?'var(--green)':'var(--amber-dim)'};color:${strong?'var(--green)':'var(--amber)'};font-weight:bold;`;
+    badge.textContent=`${strong?'STRONG':'LEAD'} ${c.score}`;
+    tdStr.appendChild(badge);
+
+    const tdHost=document.createElement('td');tdHost.style.cssText='padding:7px 12px;color:var(--cyan);word-break:break-all;';tdHost.textContent=c.host;
+
+    const tdFeat=document.createElement('td');tdFeat.style.cssText='padding:7px 12px;color:var(--purple);';
+    (c.matched_features||[]).forEach((f,i)=>{
+      const s=document.createElement('span');
+      s.style.cssText='display:inline-block;padding:1px 6px;margin:1px 4px 1px 0;font-size:9px;border:1px solid var(--purple);color:var(--purple);';
+      s.textContent=f;tdFeat.appendChild(s);
+    });
+
+    const tdSrc=document.createElement('td');tdSrc.style.cssText='padding:7px 12px;color:var(--text-muted);font-size:9px;';tdSrc.textContent=(c.sources||[]).join(' · ');
+
+    tr.appendChild(tdStr);tr.appendChild(tdHost);tr.appendChild(tdFeat);tr.appendChild(tdSrc);
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb);body.appendChild(tbl);
+  document.getElementById('clusterCandPanel').style.display='';
+}
+
+function exportClusterJSON(){
+  if(!clusterData)return;
+  const out={...clusterData,_meta:{tool:'CRUCIBLE SIGINT — Cluster Fingerprint',generated:new Date().toISOString()}};
+  const stamp=Date.now();
+  downloadBlob(JSON.stringify(out,null,2),`crucible-cluster-${stamp}.json`,'application/json');
 }
 
 document.addEventListener('DOMContentLoaded', ()=>{
