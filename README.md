@@ -162,8 +162,8 @@ export MNEMONIC_API_KEY="..."        # Mnemonic Argus Passive DNS
 # Optional: relocate the self-tracking SQLite store
 export CRUCIBLE_PDNS_DB="/path/to/crucible_pdns.sqlite"
 
-python crucible_app.py
-# → http://localhost:8000
+venv/bin/uvicorn main:app --reload
+# → http://127.0.0.1:8000
 ```
 
 API keys can also be updated at runtime from the Settings tab (in-memory for the session). See `API_KEYS.md` for the per-provider signup flow and rate limits.
@@ -222,17 +222,25 @@ All exports support **defang toggle** — IOCs neutralised with `[.]` and `[://]
 
 ```
 crucible-sigint/
-├── crucible_app.py                   # FastAPI backend — SSE pipeline, all scoring, route handlers
-├── intelligence_extensions.py        # External TI fetchers (VT, OTX, ThreatFox, GTI, CIRCL, Mnemonic, subdomain enum)
-├── pivot_intel.py                    # Platform-pivot computation (favicon mmh3, body hash, JARM grouping)
-├── infrastructure_timeline.py        # Per-IP infrastructure history tracking
-├── asn_intelligence.py               # ASN-level enrichment, hosting-provider patterns
-├── ioc_correlation_engine.py         # Cross-source IOC correlation
-├── pdns_store.py                     # SQLite self-tracking passive-DNS index
-├── diff_engine.py                    # Scan-to-scan diff (added/removed/stable IPs, source changes)
-├── automated_revalidation.py         # Server-side revalidation (UI removed; API retained)
+├── main.py                           # uvicorn entry point — adds src/ to sys.path, exports `app`
+├── src/                              # all application code
+│   ├── crucible_app.py               # FastAPI backend — SSE pipeline, scoring, route handlers
+│   ├── intelligence_extensions.py    # External TI fetchers (VT, OTX, ThreatFox, GTI, CIRCL, Mnemonic, …)
+│   ├── pivot_intel.py                # Platform-pivot computation (favicon mmh3, body hash, JARM)
+│   ├── cluster_fingerprint.py        # Multi-seed pivot + auto-expand (cert/JARM/NS/tracking/body-fragment)
+│   ├── origin_discovery.py           # Cloudflare/CDN origin-IP discovery
+│   ├── cache_store.py                # SQLite TTL cache (CT lookups, pipeline results)
+│   ├── pdns_store.py                 # SQLite self-tracking passive-DNS index
+│   ├── infrastructure_timeline.py    # Per-IP infrastructure history tracking
+│   ├── asn_intelligence.py           # ASN-level enrichment, hosting-provider patterns
+│   ├── ioc_correlation_engine.py     # Cross-source IOC correlation
+│   ├── diff_engine.py                # Scan-to-scan diff (added/removed/stable IPs)
+│   └── automated_revalidation.py     # Server-side revalidation API
 ├── templates/
 │   └── index.html                    # Full frontend — modes, panels, exports
+├── tests/                            # pytest + ad-hoc verification scripts
+├── docs/                             # design notes, enhancement summaries, per-feature docs
+├── data/                             # runtime SQLite stores (cache + self-tracking pDNS)
 ├── requirements.txt
 ├── LICENSE                           # MIT
 └── README.md

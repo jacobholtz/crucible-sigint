@@ -154,7 +154,20 @@ async def fetch_virustotal_reputation(seed: str, api_key: str) -> dict:
             harmless = int(stats.get("harmless", 0) or 0)
             undetected = int(stats.get("undetected", 0) or 0)
             timeout = int(stats.get("timeout", 0) or 0)
-            total = malicious + suspicious + harmless + undetected + timeout
+            # VT's UI denominator counts every vendor that returned *anything* —
+            # including type-unsupported, failure, and confirmed-timeout — so
+            # summing only the five "named" buckets undercounts and makes our
+            # "N/total" badge disagree with what the analyst sees on VT.
+            # Sum all integer-valued keys in the stats dict instead.
+            other_total = 0
+            for k, v in stats.items():
+                if k in ("malicious", "suspicious", "harmless", "undetected", "timeout"):
+                    continue
+                try:
+                    other_total += int(v or 0)
+                except (TypeError, ValueError):
+                    pass
+            total = malicious + suspicious + harmless + undetected + timeout + other_total
             verdict = "malicious" if malicious > 0 else ("suspicious" if suspicious > 0 else "clean")
             return {
                 identity_key: seed,
@@ -163,6 +176,7 @@ async def fetch_virustotal_reputation(seed: str, api_key: str) -> dict:
                 "harmless": harmless,
                 "undetected": undetected,
                 "timeout": timeout,
+                "other": other_total,
                 "total": total,
                 "reputation": int(attrs.get("reputation", 0) or 0),
                 "verdict": verdict,
@@ -1336,7 +1350,13 @@ async def fetch_otx_domain_passive_dns(
         cleaned = cleaned[:cap]
         return {"domain": domain, "records": cleaned, "count": len(cleaned)}
     except Exception as e:
-        return {"error": f"OTX domain passive-DNS failed: {e}",
+        # `str(e)` is empty for several httpx errors (notably ReadTimeout) —
+        # surface the exception type name too so the log line isn't a
+        # truncated "...failed:" with nothing useful after the colon.
+        # Don't duplicate the "OTX domain passive-DNS failed" prefix — the
+        # caller's SSE emitter already labels the source.
+        msg = str(e).strip()
+        return {"error": f"{type(e).__name__}{f': {msg}' if msg else ''}",
                 "domain": domain, "records": [], "count": 0}
 
 

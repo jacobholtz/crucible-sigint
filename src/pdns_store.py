@@ -61,10 +61,15 @@ from contextlib import contextmanager
 from typing import Iterable, Optional
 
 
+# Default DB path lives in <project root>/data/ — sibling of src/. Created
+# on demand by the first connect(). CRUCIBLE_PDNS_DB env var still wins for
+# tests / alternate deployments.
 _DEFAULT_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
     "crucible_pdns.sqlite",
 )
+os.makedirs(os.path.dirname(_DEFAULT_PATH), exist_ok=True)
 DB_PATH = os.environ.get("CRUCIBLE_PDNS_DB", _DEFAULT_PATH)
 
 _SCHEMA = """

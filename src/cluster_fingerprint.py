@@ -88,7 +88,12 @@ PIVOT_TEMPLATES: dict[str, str] = {
     "jarm":             'https://search.censys.io/search?resource=hosts&q=services.jarm.fingerprint:"{value}"',
     "body_sha256_norm": 'https://publicwww.com/websites/"{value_12}"/',
     "body_sha256":      'https://publicwww.com/websites/"{value_12}"/',
-    "tracking_id":      'https://publicwww.com/websites/"{value}"/',
+    # SpyOnWeb's web UI (spyonweb.net) is the most useful free clickthrough
+    # for tracking-ID reverse lookup. publicwww has the data too but is
+    # paywalled. The programmatic API at api.spyonweb.com is documented but
+    # account registration is currently broken, so we surface the web UI
+    # link for one-off manual analyst checks instead.
+    "tracking_id":      'https://spyonweb.net/domain/{value}',
     "server_header":    'https://www.shodan.io/search?query=http.headers.server:"{value}"',
     "title":            'https://www.shodan.io/search?query=http.title:"{value}"',
     "nameservers":      'https://search.censys.io/search?resource=hosts&q=names:"{value}"',
@@ -294,6 +299,11 @@ async def cluster_fingerprint(
 
     per_seed_features: list[list[tuple[str, str]]] = []
     seed_meta: list[dict] = []
+    # Collect one HTML sample per unique body hash so the body-fragment pivot
+    # in expand_cluster has template content to extract signature strings
+    # from. Dedup on body_sha256_norm keeps the payload small when many seeds
+    # share the same kit page.
+    body_samples_by_hash: dict[str, str] = {}
     for item in pairs:
         if isinstance(item, BaseException):
             seed_meta.append({"seed": "?", "cache_hit": False, "cached_at": None,
@@ -309,11 +319,22 @@ async def cluster_fingerprint(
             "feature_count": len(feats),
             "error": result.get("error") if isinstance(result, dict) else None,
         })
+        fp = result.get("pivot_fingerprint") if isinstance(result, dict) else None
+        if isinstance(fp, dict):
+            body_html = fp.get("body_html") or ""
+            body_norm = fp.get("body_sha256_norm") or ""
+            if body_html and body_norm and body_norm not in body_samples_by_hash:
+                body_samples_by_hash[body_norm] = body_html
 
     ranked = rank_shared_features(per_seed_features)
+    # Cap samples sent to the client / expand step. Three unique templates
+    # is plenty: the fragment extractor pulls top-K from each, and beyond
+    # three we're paying JSON-size cost for diminishing returns.
+    body_samples = list(body_samples_by_hash.values())[:3]
     return {
         "seeds": seed_meta,
         "ranked": ranked,
+        "body_samples": body_samples,
         "settings_hash": settings_hash or None,
         "ttl_hours": cache_ttl_hours,
         "generated_at": int(time.time()),
@@ -346,6 +367,129 @@ PIVOTABLE_CLASSES: tuple[str, ...] = (
     "nameservers",
     "tracking_id",
 )
+
+# Body fragments are NOT in PIVOTABLE_CLASSES because they don't consume a
+# ``max_features`` slot — they're a separate always-on phase in
+# ``expand_cluster`` that runs whenever HTML samples are provided. This
+# catches the "same kit, per-domain text variations" case where the
+# normalized body hash differs across seeds but distinctive template
+# fragments still collide. Budget is governed by ``max_body_fragments``.
+
+
+# ════════════════════════════════════════════════════════════════════
+# DISTINCTIVE FRAGMENT EXTRACTION
+# ════════════════════════════════════════════════════════════════════
+#
+# Goal: given the HTML body of one seed in the cluster, produce a small list
+# of 25–120 character strings that are unusual enough to identify the kit's
+# other instances when searched via urlscan's `page.html:"<frag>"` query.
+# Quality of fragments matters far more than quantity — one well-chosen
+# fragment finds the cluster; a hundred generic ones drown the result list.
+
+# Substrings that mark a fragment as too generic to query. Anything from a
+# popular library / boilerplate / common cookie banner is a near-guaranteed
+# urlscan blowout, so we drop it pre-query rather than after per_feature_cap.
+_FRAGMENT_BLOCKLIST = (
+    "jquery", "bootstrap", "fontawesome", "font-awesome",
+    "google-analytics", "googletagmanager", "gtag(", "fbq(", "_paq",
+    "googleanalyticsobject", "facebook.com/tr", "googleadservices",
+    "doubleclick.net", "googlesyndication", "amazon-adsystem",
+    "cookiepolicy", "cookie-policy", "privacy-policy", "privacypolicy",
+    "all rights reserved", "click here", "lorem ipsum", "loading...",
+    "read more", "learn more", "terms of service", "terms-of-service",
+    "data-toggle=", "data-target=", "data-bs-",
+    "navbar-toggler", "modal-dialog", "carousel-item",
+    "container-fluid", "row align-items", "col-md-", "col-lg-",
+    "viewport-fit", "ua-compatible", "csrf-token", "csrf_token",
+    "x-ua-compatible", "@charset",
+    # Cloudflare challenge / errors-page boilerplate (common when the seed
+    # is gated and we're matching on the "Sorry, you have been blocked" page)
+    "cloudflare", "cf_clearance", "ray id", "cf-ray",
+    # Generic CSS / typography rules
+    "font-family:", "background-color:", "border-radius:", "box-shadow:",
+)
+
+_QUOTED_FRAGMENT_RE = re.compile(r'"([^"\\\n\r]{25,120})"|\'([^\'\\\n\r]{25,120})\'')
+_TAG_TEXT_RE = re.compile(r'>([^<>]{25,200})<')
+_SCRIPT_STYLE_RE = re.compile(r'<(script|style|noscript)[^>]*>.*?</\1>', re.I | re.S)
+
+
+def _is_distinctive_fragment(s: str) -> bool:
+    """Cheap structural + blocklist filter on a candidate fragment. The goal
+    is to eliminate obvious library / boilerplate strings before we spend an
+    urlscan query on them — final dedup-by-uselessness still happens via
+    ``per_feature_cap`` after the search."""
+    s = s.strip()
+    if not (25 <= len(s) <= 120):
+        return False
+    sl = s.lower()
+    for bad in _FRAGMENT_BLOCKLIST:
+        if bad in sl:
+            return False
+    # Character diversity: a 40-char string of 4 unique characters is
+    # almost certainly a CSS rule, base64 padding, or whitespace pattern.
+    if len(set(s)) < 10:
+        return False
+    # Must contain at least one letter and one non-letter to skip pure
+    # alphabet runs or pure number runs.
+    has_alpha = any(c.isalpha() for c in s)
+    has_nonalpha = any(not c.isalpha() for c in s)
+    if not (has_alpha and has_nonalpha):
+        return False
+    return True
+
+
+def _distinctiveness_score(s: str) -> float:
+    """Higher = more likely to be the kit-identifying signature. Rewards
+    mixed-case + digit + punctuation (version strings, identifiers) over
+    flat lowercase prose."""
+    has_digit = any(c.isdigit() for c in s)
+    has_upper = any(c.isupper() for c in s)
+    has_id_punct = any(c in "_-./~:@" for c in s)
+    diversity = len(set(s)) / max(len(s), 1)
+    return (
+        (1.0 if has_digit else 0.0)
+        + (0.7 if has_upper else 0.0)
+        + (0.5 if has_id_punct else 0.0)
+        + diversity * 2.0
+        + min(len(s), 100) / 100.0
+    )
+
+
+def extract_distinctive_fragments(html: str, max_fragments: int = 5) -> list[str]:
+    """Extract up to ``max_fragments`` distinctive 25–120 char strings from
+    an HTML body — the kind of strings you'd plug into publicwww or urlscan
+    to find sister sites built from the same template."""
+    if not html:
+        return []
+    # Strip <script>/<style>/<noscript> blocks: their contents are usually
+    # minified library code that the blocklist would catch but it's cheaper
+    # to skip them entirely than to filter every candidate.
+    no_inline = _SCRIPT_STYLE_RE.sub(" ", html)
+
+    candidates: list[str] = []
+    # 1. HTML attribute values + JS string literals
+    for m in _QUOTED_FRAGMENT_RE.finditer(html):
+        s = m.group(1) or m.group(2) or ""
+        if s:
+            candidates.append(s)
+    # 2. Visible text between tags
+    for m in _TAG_TEXT_RE.finditer(no_inline):
+        s = m.group(1).strip()
+        if s:
+            candidates.append(s)
+
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for c in candidates:
+        if c in seen:
+            continue
+        seen.add(c)
+        uniq.append(c)
+
+    filtered = [c for c in uniq if _is_distinctive_fragment(c)]
+    filtered.sort(key=_distinctiveness_score, reverse=True)
+    return filtered[:max_fragments]
 
 
 async def _shodan_jarm_pivot(jarm: str, api_key: str, limit: int = 40) -> dict:
@@ -504,8 +648,11 @@ async def _urlscan_tracking_pivot(value: str, api_key: str = "", limit: int = 20
 
 async def _spyonweb_tracking_pivot(value: str, api_key: str, limit: int = 200) -> dict:
     """SpyOnWeb reverse-lookup for an Analytics / AdSense ID. The documented
-    JSON API needs a free access token; without one we surface a clear note
-    rather than scraping the web UI."""
+    JSON API (api.spyonweb.com) needs a free access token, but their account
+    registration appears broken as of 2026 — most users get a 404 / redirect
+    to homepage. Without a token we skip the call cleanly and let urlscan
+    carry the tracking-ID pivot alone; users with a legacy token (or if
+    registration comes back) get the SpyOnWeb hits unioned in transparently."""
     if not value:
         return {"value": value, "matches": [], "total": 0, "error": "empty value"}
     if not api_key:
@@ -606,6 +753,7 @@ async def expand_cluster(
     ranked: list[dict],
     exclude_hosts: Iterable[str] = (),
     *,
+    body_samples: Iterable[str] = (),
     shodan_key: str = "",
     censys_id: str = "",
     censys_secret: str = "",
@@ -614,6 +762,7 @@ async def expand_cluster(
     max_features: int = 5,
     per_feature_cap: int = 2000,
     matches_per_feature: int = 200,
+    max_body_fragments: int = 4,
 ) -> dict:
     """Auto-pivot on the top shared features to surface additional hosts.
 
@@ -703,6 +852,72 @@ async def expand_cluster(
                              "total": total, "returned": len(matches),
                              "contributed": contributed,
                              "error": err})
+
+    # ── Body-fragment phase ──
+    # Independent of ranked features: if we have any HTML samples from the
+    # cluster, extract distinctive 25–120 char fragments and search urlscan
+    # for each. Each fragment becomes its own pivoted_meta entry of class
+    # "body_fragment"; hosts that match multiple fragments inherit the
+    # standard multi-feature STRONG scoring via the shared agg dict.
+    fragment_list: list[str] = []
+    seen_frags: set[str] = set()
+    for sample in body_samples:
+        if not isinstance(sample, str):
+            continue
+        for f in extract_distinctive_fragments(sample, max_fragments=max_body_fragments):
+            if f in seen_frags:
+                continue
+            seen_frags.add(f)
+            fragment_list.append(f)
+            if len(fragment_list) >= max_body_fragments:
+                break
+        if len(fragment_list) >= max_body_fragments:
+            break
+
+    if fragment_list:
+        frag_tasks = [_urlscan_tracking_pivot(f, urlscan_key, limit=matches_per_feature)
+                      for f in fragment_list]
+        frag_results = await asyncio.gather(*frag_tasks, return_exceptions=True)
+        for frag, res in zip(fragment_list, frag_results):
+            if isinstance(res, BaseException):
+                skipped.append({"class": "body_fragment", "value": frag,
+                                "reason": f"pivot raised: {res}"})
+                continue
+            if not isinstance(res, dict):
+                skipped.append({"class": "body_fragment", "value": frag,
+                                "reason": "no result"})
+                continue
+            total = int(res.get("total") or 0)
+            err = res.get("error")
+            matches = res.get("matches") or []
+            if total > per_feature_cap:
+                skipped.append({"class": "body_fragment", "value": frag,
+                                "reason": f"too generic ({total} upstream hits > cap {per_feature_cap})"})
+                continue
+            contributed = 0
+            for m in matches:
+                host = (m.get("host") or "").strip().lower().rstrip(".")
+                if not host or host in exclude:
+                    continue
+                src = m.get("source") or "urlscan"
+                entry = agg.setdefault(host, {"host": host,
+                                              "matched_features": set(),
+                                              "sources": set(),
+                                              "evidence": []})
+                if "body_fragment" not in entry["matched_features"]:
+                    entry["evidence"].append({"class": "body_fragment",
+                                              "value": frag[:60] + ("…" if len(frag) > 60 else ""),
+                                              "source": src})
+                entry["matched_features"].add("body_fragment")
+                entry["sources"].add(src)
+                contributed += 1
+            pivoted_meta.append({"class": "body_fragment", "value": frag,
+                                 "total": total, "returned": len(matches),
+                                 "contributed": contributed, "error": err})
+    elif any(isinstance(s, str) and s for s in body_samples):
+        # We had samples but couldn't extract anything pass the blocklist.
+        skipped.append({"class": "body_fragment", "value": "",
+                        "reason": "no distinctive fragments survived blocklist + length filter"})
 
     candidates: list[dict] = []
     for entry in agg.values():

@@ -145,6 +145,10 @@ async def fetch_seed_fingerprint(domain: str, timeout: float = 12.0) -> Dict[str
         "url": None, "status": None, "server": None, "title": None,
         "content_length": None,
         "body_sha256": None, "body_sha256_norm": None,
+        # Truncated raw HTML kept so downstream tools (Cluster body-fragment
+        # pivot) can extract distinctive code/text fragments to search for sister
+        # sites by template, without needing to re-fetch the page.
+        "body_html": None,
         "favicon_url": None, "favicon_hash": None, "favicon_md5": None,
         "favicon_sha256": None, "favicon_bytes": 0,
         "tracking_ids": [],
@@ -175,6 +179,10 @@ async def fetch_seed_fingerprint(domain: str, timeout: float = 12.0) -> Dict[str
                 # catches the "same template, different CSRF token" pattern.
                 norm = re.sub(r"\s+", " ", html_text).strip().lower()
                 out["body_sha256_norm"] = hashlib.sha256(norm.encode("utf-8", errors="ignore")).hexdigest()
+                # Truncate at 64KB: enough to capture a distinctive template
+                # without bloating result dicts / cache rows. The fragment
+                # extractor only looks at the first few thousand chars anyway.
+                out["body_html"] = html_text[:65536]
                 # Title
                 m = re.search(r"<title[^>]*>([^<]{1,200})</title>", html_text, re.I)
                 if m:

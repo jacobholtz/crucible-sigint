@@ -62,8 +62,12 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 import uvicorn
 import publicsuffix2
 
-BASE_DIR = pathlib.Path(__file__).parent.resolve()
-TEMPLATE = BASE_DIR / "templates" / "index.html"
+# Project root is the parent of src/ now that modules live in src/. Templates
+# and the data/ directory are siblings of src/. BASE_DIR retained for any
+# downstream code that referenced it previously.
+PROJECT_ROOT = pathlib.Path(__file__).parent.parent.resolve()
+BASE_DIR = PROJECT_ROOT
+TEMPLATE = PROJECT_ROOT / "templates" / "index.html"
 
 # Module-level constant — ASN numbers known to belong to datacenter/hosting providers.
 # Rebuilt here once rather than inside the hot path of fetch_ipinfo().
@@ -160,6 +164,7 @@ from pivot_intel import (fetch_seed_fingerprint, shodan_favicon_pivot,
                           extract_jarms_from_shodan_results)
 import cache_store
 import cluster_fingerprint as _cluster_fp
+import origin_discovery as _origin
 # Import IOC correlation engine
 from ioc_correlation_engine import correlate_iocs_with_threat_feeds, analyze_correlation_results
 
@@ -408,20 +413,32 @@ async def fetch_crtsh(domain: str, sources: set[str] | None = None) -> list[dict
         if src not in enabled or results:
             continue
         try:
+            # 24h TTL keeps iterative re-runs of the same seed (the dominant
+            # analyst workflow during a hot investigation) at zero CT-API
+            # cost — crt.sh especially is 60–90s per cold call, and most of
+            # that latency vanishes on the second invocation. Cache keys are
+            # source-scoped so changing CT settings still rebuilds.
             if src == "certspotter":
                 if is_substring or "." not in base:
                     continue  # certspotter has no substring search
-                got, rows = await _ct_certspotter(base)
+                got, rows = await cache_store.cached_api_call(
+                    "certspotter", base, 24, lambda: _ct_certspotter(base))
             elif src == "certkit":
                 if is_substring or "." not in base:
                     continue  # certkit is exact-domain only — no substring search
-                got, rows = await _ct_certkit(base)
+                got, rows = await cache_store.cached_api_call(
+                    "certkit", base, 24, lambda: _ct_certkit(base))
             elif src == "crtsh":
-                got, rows = await _ct_crtsh(crtsh_query)
+                got, rows = await cache_store.cached_api_call(
+                    "crtsh", crtsh_query, 24, lambda: _ct_crtsh(crtsh_query))
             elif src == "censys":
-                got, rows = await _ct_censys(base, is_substring)
+                got, rows = await cache_store.cached_api_call(
+                    "censys_ct", f"{base}|sub={is_substring}", 24,
+                    lambda: _ct_censys(base, is_substring))
             elif src in CT_PROVIDERS:
-                got, rows = await _ct_provider(src, CT_PROVIDERS[src], base)
+                got, rows = await cache_store.cached_api_call(
+                    f"ct_provider:{src}", base, 24,
+                    lambda: _ct_provider(src, CT_PROVIDERS[src], base))
             else:
                 continue
         except Exception:
@@ -439,7 +456,11 @@ async def _ct_summary_for_domain(domain: str) -> dict | None:
     drop unknown domains cleanly. crt.sh is intentionally not used here — for an
     N-domain enrichment loop, a single crt.sh outage shouldn't slow the lot."""
     try:
-        got, rows = await _ct_certspotter(domain)
+        # Neighbor CT enrichment fires up to 25× per scan in S17; the cache
+        # makes re-scans of a cluster of seeds in the same campaign nearly
+        # free on that stage.
+        got, rows = await cache_store.cached_api_call(
+            "certspotter", domain, 24, lambda: _ct_certspotter(domain))
     except Exception:
         return None
     if not got or not rows:
@@ -493,6 +514,34 @@ MAJOR_HOSTING_PROVIDERS = (
     "stackpath", "incapsula", "sucuri", "ionos", "namesilo", "porkbun", "plesk",
 )
 _CDN_PROVIDERS = ("cloudflare", "akamai", "fastly", "incapsula", "sucuri", "stackpath", "gcore")
+
+# Static fallback for the S9 shared-CDN ThreatFox suppression — covers the case
+# where S4 (asn_intel) was disabled or its lookup failed, so we have no ISP
+# string to scan but still need to recognize Cloudflare/Akamai/Fastly anycast
+# IPs as shared infrastructure. Sourced from each provider's published ranges;
+# refresh occasionally as they expand.
+_SHARED_CDN_CIDRS = tuple(ipaddress.ip_network(c) for c in (
+    # Cloudflare — https://www.cloudflare.com/ips-v4
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+    # Akamai — major anycast ranges
+    "23.32.0.0/11", "23.192.0.0/11", "104.64.0.0/10", "184.24.0.0/13",
+    "23.0.0.0/12", "2.16.0.0/13",
+    # Fastly — major anycast ranges
+    "151.101.0.0/16", "199.232.0.0/16", "146.75.0.0/16",
+))
+
+
+def _is_shared_cdn_ip(ip_str: str) -> bool:
+    """True if ``ip_str`` falls inside a published CDN anycast range. Used as
+    the S9 fallback when per-IP ASN data is unavailable."""
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return any(ip in net for net in _SHARED_CDN_CIDRS)
 
 def classify_ip_hosting(info: dict, domain_count: int) -> dict:
     """Decide whether an IP is shared hosting / CDN, where co-located domains are NOT
@@ -1320,7 +1369,11 @@ def _findings_from_threatfox(tf_data: dict, *, context_seed: str = "") -> list:
     """
     findings = []
     for m in (tf_data.get("matches") or []):
-        if m.get("suppressed_shared_cdn"):
+        # CDN edges and shared-hosting multi-tenant IPs both filtered by S9.
+        # ``suppressed_shared_cdn`` = anycast Cloudflare / Akamai / Fastly;
+        # ``suppressed_shared_hosting`` = AWS / GCP / OVH / GoDaddy / etc.
+        # Either way the IP-only association can't be attributed to this seed.
+        if m.get("suppressed_shared_cdn") or m.get("suppressed_shared_hosting"):
             continue
         malware = (m.get("malware") or "").strip()
         threat_type = (m.get("threat_type") or "").strip()
@@ -1632,6 +1685,75 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
             yield sse("log",{"msg":f"S3: {ip} enrichment failed — {e}","type":"warn","stage":"S3"})
     yield sse("chip",{"id":"ipapi","state":"live" if result["ip_results"] else "fail"})
     yield sse("stage",{"n":3,"state":"done"})
+
+    # ── S3b: Auto Origin Discovery (CDN-fronted seeds only) ──
+    # If the resolved IPs are all CDN anycast (Cloudflare/Akamai/Fastly), the
+    # rest of the pipeline would otherwise spend its API quota fingerprinting
+    # the proxy edge instead of the actor's actual infrastructure. Run origin
+    # discovery first; if it produces a STRONG candidate (≥2 independent
+    # techniques agree), substitute the origin IP(s) into the working IP set
+    # so all downstream stages (ASN/Shodan/VT/ThreatFox/reverse-IP/...) pivot
+    # on the origin instead. Original CDN edges are preserved on the result
+    # for transparency.
+    if feat("origin_discovery") and not is_ip and ips:
+        all_cdn = all(_origin.is_shared_cdn_ip(ip) for ip in ips)
+        if all_cdn:
+            yield sse("stage", {"n": "3b", "state": "active"})
+            yield sse("log", {"msg": f"S3b: All resolved IPs are CDN anycast — running auto origin-discovery before pivot stages",
+                              "type":"live","stage":"S3b"})
+            try:
+                origin_out = await _origin.discover_origin(
+                    seed,
+                    censys_id=CENSYS_API_ID or "", censys_secret=CENSYS_API_SECRET or "",
+                    shodan_key=SHODAN_API_KEY or "",
+                    vt_key=VIRUSTOTAL_API_KEY or "", otx_key=ALIENVAULT_API_KEY or "",
+                    ip_enricher=fetch_ipinfo,
+                )
+            except Exception as e:
+                origin_out = {"candidates": [], "techniques_run": [], "skipped": [],
+                              "error": f"discover_origin failed: {e}"}
+                yield sse("log", {"msg": f"S3b: origin discovery raised — {e}", "type":"warn","stage":"S3b"})
+
+            strong = [c for c in (origin_out.get("candidates") or [])
+                      if c.get("confidence") == "strong"]
+            substituted = False
+            if strong:
+                # Cap to 3 origin IPs so the downstream per-IP loops don't
+                # blow up if cert search returned many.
+                origin_ips = [c["ip"] for c in strong][:3]
+                result["cdn_edge_ips"] = list(ips)
+                ips = list(origin_ips)
+                # Rebuild ip_results for the new IPs so S4 onwards has the
+                # correct ASN/ISP context (CDN classification, the org
+                # name, the country, etc.).
+                result["ip_results"] = []
+                for ip in ips:
+                    try:
+                        await asyncio.sleep(0.2)
+                        info = await fetch_ipinfo(ip)
+                        hosting = classify_ip_hosting(info, 1)
+                        info["hosting_class"] = hosting
+                        info["_origin_substituted"] = True
+                        result["ip_results"].append(info)
+                        yield sse("ipInfo", {"ip": ip, "info": info, "domains": [seed],
+                                             "domain_count": 1, "hosting_class": hosting,
+                                             "origin_substituted": True})
+                    except Exception as e:
+                        yield sse("log", {"msg": f"S3b: origin {ip} enrichment failed — {e}",
+                                          "type":"warn","stage":"S3b"})
+                substituted = True
+                yield sse("log", {"msg": f"S3b: Substituted {len(ips)} origin IP(s) into pipeline — downstream stages will pivot on origin instead of CDN edges: {', '.join(ips)}",
+                                  "type":"ok","stage":"S3b"})
+            else:
+                ttypes = ", ".join(f"{t['technique']}={t.get('kept',0)}" for t in origin_out.get("techniques_run") or [])
+                yield sse("log", {"msg": f"S3b: No STRONG origin candidate found ({ttypes or 'no techniques returned data'}) — continuing pivot stages against CDN edges",
+                                  "type":"warn","stage":"S3b"})
+
+            origin_out["substituted"] = substituted
+            origin_out["original_cdn_ips"] = result.get("cdn_edge_ips") or list(ips) if not substituted else result["cdn_edge_ips"]
+            result["origin_discovery"] = origin_out
+            yield sse("origin", origin_out)
+            yield sse("stage", {"n": "3b", "state": "done"})
 
     # ── S4: ASN Intelligence ──
     yield sse("stage",{"n":4,"state":"active"})
@@ -1984,31 +2106,71 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
         # seed inherits the IP only because Cloudflare anycast routes every
         # fronted domain to those same edges. Without this guard, every
         # CF-fronted seed would surface phantom "Quasar RAT" findings.
-        cdn_ips = {
+        cdn_ips_from_asn = {
             str(a.get("ip")) for a in (result.get("asn_data") or [])
             if any(p in (f"{a.get('asn_string','')} {a.get('asn_name','')} {a.get('organization','')}").lower()
                    for p in _CDN_PROVIDERS)
         }
         suppressed = 0
-        if cdn_ips:
-            for m in (tf_data.get("matches") or []):
-                matched_by = m.get("matched_by") or []
-                # Only IP-only hits are unsafe on shared infra; if the seed
-                # itself also matched, the link is legitimate.
-                if "seed" in matched_by or "ip" not in matched_by:
-                    continue
-                ioc_ip = (m.get("ioc") or "").split(":", 1)[0].strip()
-                if ioc_ip in cdn_ips:
-                    m["suppressed_shared_cdn"] = True
-                    suppressed += 1
-            if suppressed:
-                yield sse("log", {"msg": f"S9: Suppressed {suppressed} ThreatFox IP-only match(es) on shared anycast CDN range — historic C2 record at that IP is not attributable to this seed", "type": "info", "stage":"S9"})
+        for m in (tf_data.get("matches") or []):
+            matched_by = m.get("matched_by") or []
+            # Only IP-only hits are unsafe on shared infra; if the seed
+            # itself also matched, the link is legitimate.
+            if "seed" in matched_by or "ip" not in matched_by:
+                continue
+            ioc_ip = (m.get("ioc") or "").split(":", 1)[0].strip()
+            # Two-layer check: per-IP ASN lookup if S4 ran, plus a static
+            # CIDR fallback so this still works when asn_intel is disabled.
+            if ioc_ip in cdn_ips_from_asn or _is_shared_cdn_ip(ioc_ip):
+                m["suppressed_shared_cdn"] = True
+                suppressed += 1
+        if suppressed:
+            yield sse("log", {"msg": f"S9: Suppressed {suppressed} ThreatFox IP-only match(es) on shared anycast CDN range — historic C2 record at that IP is not attributable to this seed", "type": "info", "stage":"S9"})
+
+        # Parallel suppression for shared-hosting providers (AWS, GCP, Azure,
+        # OVH, Hetzner, GoDaddy, Squarespace, …). Same false-positive class as
+        # CDN anycast: these IPs serve thousands of unrelated tenants over
+        # time, so a ThreatFox IP-only hit means "some other tenant on this
+        # box was malicious at some point" — not attributable to the current
+        # seed even if a historical pDNS observation linked them.
+        hosting_ips_from_asn = {
+            str(a.get("ip")) for a in (result.get("asn_data") or [])
+            if any(p in (f"{a.get('asn_string','')} {a.get('asn_name','')} "
+                          f"{a.get('organization','')} {a.get('isp','')}").lower()
+                   for p in MAJOR_HOSTING_PROVIDERS)
+        }
+        # Historical-only IPs (in pDNS but not currently resolving) deserve
+        # the most aggressive demotion: the "shared-tenant" risk applies AND
+        # the link to the current seed is itself historical.
+        current_ip_set = set(ips) if not is_ip else {seed}
+        hosting_suppressed = 0
+        for m in (tf_data.get("matches") or []):
+            if m.get("suppressed_shared_cdn"):
+                continue
+            matched_by = m.get("matched_by") or []
+            if "seed" in matched_by or "ip" not in matched_by:
+                continue
+            ioc_ip = (m.get("ioc") or "").split(":", 1)[0].strip()
+            if ioc_ip in hosting_ips_from_asn:
+                m["suppressed_shared_hosting"] = True
+                m["historical_only"] = ioc_ip not in current_ip_set
+                hosting_suppressed += 1
+        if hosting_suppressed:
+            hist_n = sum(1 for m in (tf_data.get("matches") or [])
+                         if m.get("suppressed_shared_hosting") and m.get("historical_only"))
+            yield sse("log", {
+                "msg": f"S9: Suppressed {hosting_suppressed} ThreatFox IP-only match(es) on shared-hosting infrastructure (AWS / GCP / OVH / etc.) — multi-tenant IPs collect unrelated IOCs over time and aren't attributable to this seed"
+                       + (f" ({hist_n} were historical-only)" if hist_n else ""),
+                "type": "info", "stage": "S9",
+            })
+
         result["threatfox"] = tf_data
         if tf_data.get("error") and not tf_data.get("matches"):
             yield sse("log", {"msg": f"S9: ThreatFox: {tf_data['error']}", "type": "warn", "stage":"S9"})
         else:
             all_matches = tf_data.get("matches") or []
-            attributable = [m for m in all_matches if not m.get("suppressed_shared_cdn")]
+            attributable = [m for m in all_matches
+                            if not (m.get("suppressed_shared_cdn") or m.get("suppressed_shared_hosting"))]
             n = len(attributable)
             sh, ih = tf_data.get("seed_hits", 0), tf_data.get("ip_hits", 0)
             if n:
@@ -2234,6 +2396,93 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
     if not result.get("shodan_per_ip"):
         yield sse("jarmPivot", {"jarms": [], "skipped": True, "error": "skipped — no Shodan host data available"})
 
+    # Phase 3: tracking-ID + body-fragment auto-pivots via urlscan. Same
+    # helpers the CLUSTER → EXPAND tab uses; doing it inline here makes
+    # tracking IDs and shared body templates first-class auto-pivots in the
+    # standard single-seed flow, on par with favicon/JARM. Conservative caps
+    # keep the urlscan quota footprint small per scan.
+    if not is_ip and fp:
+        # ── Tracking IDs ──
+        tids = (fp or {}).get("tracking_ids") or []
+        if tids:
+            track_tasks = []
+            track_meta: list[dict] = []
+            for tid in tids[:3]:  # 3 most distinctive IDs per page is plenty
+                val = (tid or {}).get("value") if isinstance(tid, dict) else None
+                if val:
+                    track_meta.append(tid)
+                    track_tasks.append(
+                        _cluster_fp._urlscan_tracking_pivot(val, URLSCAN_API_KEY or "", limit=100)
+                    )
+            if track_tasks:
+                track_results = await asyncio.gather(*track_tasks, return_exceptions=True)
+                pivots = []
+                for tid, res in zip(track_meta, track_results):
+                    if isinstance(res, BaseException):
+                        pivots.append({"id": tid, "matches": [], "error": str(res)})
+                        continue
+                    if not isinstance(res, dict):
+                        continue
+                    total = int(res.get("total") or 0)
+                    if total > 5000:
+                        pivots.append({"id": tid, "value": res.get("value"),
+                                        "matches": [], "total": total,
+                                        "skipped": True,
+                                        "error": f"too generic ({total} hits)"})
+                        continue
+                    pivots.append({"id": tid, "value": res.get("value"),
+                                    "total": total,
+                                    "matches": res.get("matches") or [],
+                                    "error": res.get("error")})
+                result["tracking_pivot_urlscan"] = pivots
+                for p in pivots:
+                    label = (p.get("id") or {}).get("label") or "?"
+                    val = (p.get("id") or {}).get("value") or "?"
+                    if p.get("skipped"):
+                        yield sse("log", {"msg": f"S10: Tracking-ID urlscan {label}={val} — {p['error']}",
+                                           "type": "info", "stage": "S10"})
+                    elif p.get("matches"):
+                        n = len(p["matches"])
+                        yield sse("log", {"msg": f"S10: Tracking-ID urlscan pivot {label}={val} → {n} sister site(s)",
+                                           "type": "warn", "stage": "S10"})
+                    elif p.get("error"):
+                        yield sse("log", {"msg": f"S10: Tracking-ID urlscan {label}={val}: {p['error']}",
+                                           "type": "info", "stage": "S10"})
+                yield sse("trackingPivot", {"pivots": pivots})
+
+        # ── Body fragments ──
+        body_html = (fp or {}).get("body_html") or ""
+        if body_html:
+            fragments = _cluster_fp.extract_distinctive_fragments(body_html, max_fragments=3)
+            if fragments:
+                frag_tasks = [
+                    _cluster_fp._urlscan_tracking_pivot(f, URLSCAN_API_KEY or "", limit=100)
+                    for f in fragments
+                ]
+                frag_results = await asyncio.gather(*frag_tasks, return_exceptions=True)
+                frag_pivots = []
+                for frag, res in zip(fragments, frag_results):
+                    if isinstance(res, BaseException) or not isinstance(res, dict):
+                        continue
+                    total = int(res.get("total") or 0)
+                    if total > 5000:
+                        frag_pivots.append({"fragment": frag, "matches": [], "total": total,
+                                             "skipped": True, "error": f"too generic ({total} hits)"})
+                        continue
+                    frag_pivots.append({"fragment": frag, "total": total,
+                                         "matches": res.get("matches") or [],
+                                         "error": res.get("error")})
+                result["body_fragment_pivot_urlscan"] = frag_pivots
+                for p in frag_pivots:
+                    if p.get("skipped"):
+                        yield sse("log", {"msg": f"S10: Body-fragment urlscan \"{p['fragment'][:40]}…\" — {p['error']}",
+                                           "type": "info", "stage": "S10"})
+                    elif p.get("matches"):
+                        n = len(p["matches"])
+                        yield sse("log", {"msg": f"S10: Body-fragment urlscan \"{p['fragment'][:40]}…\" → {n} sister site(s)",
+                                           "type": "warn", "stage": "S10"})
+                yield sse("bodyFragmentPivot", {"pivots": frag_pivots})
+
     yield sse("stage", {"n":10, "state": "done"})
 
     # ── S11: Google Threat Intelligence (GTI) ──
@@ -2304,29 +2553,89 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
     # ── S12: Additional Infrastructure Mapping ──
     yield sse("stage",{"n":12,"state":"active"})
     yield sse("log",{"msg":"S12: Performing reverse IP lookup expansion to map hosting provider networks","type":"live","stage":"S12"})
-    
+
+    async def _multi_source_reverse_ip(ip: str) -> list[dict]:
+        """Query every available reverse-IP source for one IP in parallel and
+        return one entry per source. HackerTarget alone (the previous single
+        source) is heavily rate-limited and has spotty coverage, so popular
+        co-hosted domains (e.g. jailatm.com + inmae.me on the same IP) often
+        won't appear. Adding VT IP resolutions as a parallel source gives the
+        analyst the broadest possible neighbor view; OTX is already folded in
+        client-side from the S9 ``otx_sister`` event so we don't duplicate it
+        here."""
+        ht_task = cache_store.cached_api_call(
+            "reverseip_ht", ip, 12, lambda: fetch_reverse_ip_lookup(ip))
+        vt_task = None
+        if VIRUSTOTAL_API_KEY:
+            vt_task = cache_store.cached_api_call(
+                "vt_ip_pdns", ip, 12,
+                lambda: fetch_virustotal_passive_dns(ip, VIRUSTOTAL_API_KEY))
+
+        labels = ["hackertarget"] + (["virustotal"] if vt_task else [])
+        tasks = [ht_task] + ([vt_task] if vt_task else [])
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        out: list[dict] = []
+        for label, res in zip(labels, results):
+            if isinstance(res, BaseException):
+                out.append({"ip": ip, "domains": [], "source": label,
+                            "error": f"{type(res).__name__}: {res}"})
+                continue
+            if not isinstance(res, dict):
+                continue
+            if label == "hackertarget":
+                out.append({"ip": ip,
+                            "domains": res.get("domains", []) or [],
+                            "source": "hackertarget",
+                            "error": res.get("error"),
+                            "note": res.get("note")})
+            elif label == "virustotal":
+                # VT IP seed shape: {ip, passive_dns_count, domain_history:[{domain,last_resolved}]}
+                doms = [d.get("domain") for d in (res.get("domain_history") or [])
+                        if d.get("domain")]
+                # Dedup, preserve order
+                seen = set(); doms_uniq = []
+                for d in doms:
+                    if d not in seen:
+                        seen.add(d); doms_uniq.append(d)
+                out.append({"ip": ip,
+                            "domains": doms_uniq,
+                            "source": "virustotal",
+                            "error": res.get("error")})
+        return out
+
     try:
         if not feat("reverse_ip"): raise _StageDisabled
         # Perform reverse IP lookup for each discovered IP
-        reverse_ip_data = []
+        reverse_ip_data: list[dict] = []
         for ip in ips[:5]:  # Check first 5 IPs
             try:
-                reverse_data = await fetch_reverse_ip_lookup(ip)
-                reverse_ip_data.append(reverse_data)
-                if not reverse_data.get("error"):
-                    domain_count = reverse_data.get("count", 0)
-                    if domain_count > 0:
-                        yield sse("log",{"msg":f"S12: Reverse IP lookup for {ip} found {domain_count} domains","type":"ok","stage":"S12"})
-                        # Show first 3 domains for context
-                        domains = reverse_data.get("domains", [])[:3]
-                        for domain in domains:
-                            yield sse("log",{"msg":f"S12: Neighbor domain: {domain}","type":"ok","stage":"S12"})
+                entries = await _multi_source_reverse_ip(ip)
+                reverse_ip_data.extend(entries)
+                # Per-source logging — analyst can see which source contributed what
+                total_domains: set[str] = set()
+                for e in entries:
+                    src = e.get("source") or "?"
+                    if e.get("error"):
+                        yield sse("log", {"msg": f"S12: Reverse IP via {src} for {ip}: {e['error']}",
+                                          "type": "warn", "stage": "S12"})
+                        continue
+                    doms = e.get("domains") or []
+                    if doms:
+                        total_domains.update(doms)
+                        yield sse("log", {"msg": f"S12: {src} reverse-IP for {ip} → {len(doms)} domain(s)",
+                                          "type": "ok", "stage": "S12"})
                     else:
-                        yield sse("log",{"msg":f"S12: Reverse IP lookup for {ip} found no additional domains","type":"info","stage":"S12"})
-                else:
-                    yield sse("log",{"msg":f"S12: Reverse IP lookup failed for {ip}: {reverse_data.get('error')}","type":"warn","stage":"S12"})
+                        yield sse("log", {"msg": f"S12: {src} reverse-IP for {ip} returned no domains",
+                                          "type": "info", "stage": "S12"})
+                if total_domains:
+                    yield sse("log", {"msg": f"S12: {ip} co-hosts {len(total_domains)} unique neighbor domain(s) across sources",
+                                      "type": "ok" if len(total_domains) > 1 else "info", "stage": "S12"})
+                    # Show first 5 unique domains for context
+                    for d in list(total_domains)[:5]:
+                        yield sse("log", {"msg": f"S12: Neighbor domain: {d}",
+                                          "type": "ok", "stage": "S12"})
             except Exception as e:
-                yield sse("log",{"msg":f"S12: Reverse IP lookup failed for {ip}: {str(e)}","type":"warn","stage":"S12"})
+                yield sse("log",{"msg":f"S12: Reverse IP enrichment failed for {ip}: {str(e)}","type":"warn","stage":"S12"})
         
         # Store reverse IP data for correlation
         result["reverse_ip"] = reverse_ip_data
@@ -2690,7 +2999,8 @@ async def pipeline_standard(
     ct = _parse_settings_csv(ct_sources, set(DEFAULT_CT_SOURCES))
     feats = _parse_settings_csv(features, {
         "reverse_ip","asn_intel","ssl_graph","timeline","correlation",
-        "social_fingerprint","subdomain_discovery","revalidation"})
+        "social_fingerprint","subdomain_discovery","revalidation",
+        "origin_discovery"})
     return StreamingResponse(run_standard_pipeline(validated, ct, feats),
         media_type="text/event-stream",
         headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no","Connection":"keep-alive"})
@@ -2742,7 +3052,8 @@ async def cluster_fingerprint_route(body: dict = Body(...)):
     ct = _csv(body.get("ct_sources"), set(DEFAULT_CT_SOURCES))
     feats = _csv(body.get("features"), {
         "reverse_ip","asn_intel","ssl_graph","timeline","correlation",
-        "social_fingerprint","subdomain_discovery","revalidation"})
+        "social_fingerprint","subdomain_discovery","revalidation",
+        "origin_discovery"})
 
     valid: list[str] = []
     dropped: list[str] = []
@@ -2799,9 +3110,18 @@ async def cluster_expand_route(body: dict = Body(...)):
         per_feature_cap = 2000
     per_feature_cap = max(50, min(per_feature_cap, 20000))
 
+    body_samples = body.get("body_samples") or []
+    if not isinstance(body_samples, list):
+        body_samples = []
+    # Cap the per-sample size as a final safety net: callers should already
+    # be sending truncated payloads, but a 5MB body slipping through would
+    # bloat the urlscan-query memory and slow fragment extraction.
+    body_samples = [str(s)[:65536] for s in body_samples[:5] if s]
+
     out = await _cluster_fp.expand_cluster(
         ranked,
         exclude_hosts=exclude,
+        body_samples=body_samples,
         shodan_key=SHODAN_API_KEY or "",
         censys_id=CENSYS_API_ID or "",
         censys_secret=CENSYS_API_SECRET or "",
@@ -2809,6 +3129,30 @@ async def cluster_expand_route(body: dict = Body(...)):
         spyonweb_key=SPYONWEB_API_KEY or "",
         max_features=max_features,
         per_feature_cap=per_feature_cap,
+    )
+    return JSONResponse(out)
+
+
+@app.post("/api/origin")
+async def origin_route(body: dict = Body(...)):
+    """Cloudflare / CDN origin-IP discovery. Runs four passive techniques
+    (cert SAN search via Censys+Shodan, passive-DNS pre-CDN IPs via
+    VT+OTX, subdomain DNS-leak probe, MX-record resolution) and returns
+    candidate origin IPs scored by how many techniques surfaced each one."""
+    seed = (body.get("seed") or "").strip().lower()
+    validated, kind = validate_seed(seed)
+    if not validated or kind != "domain":
+        return JSONResponse({"error": "Origin discovery requires a domain seed (not an IP)"},
+                            status_code=400)
+
+    out = await _origin.discover_origin(
+        validated,
+        censys_id=CENSYS_API_ID or "",
+        censys_secret=CENSYS_API_SECRET or "",
+        shodan_key=SHODAN_API_KEY or "",
+        vt_key=VIRUSTOTAL_API_KEY or "",
+        otx_key=ALIENVAULT_API_KEY or "",
+        ip_enricher=fetch_ipinfo,
     )
     return JSONResponse(out)
 

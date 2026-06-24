@@ -905,6 +905,20 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
         <div class="phdr"><div class="ptitle"><div class="pdot"></div>PLATFORM PIVOTS — FAVICON · BODY · JARM · NS</div><div class="pctrls"><div class="pcount" id="pivotCount">──</div></div></div>
         <div class="pbody" id="pivotBody"><div class="empty">—</div></div>
       </div>
+      <div class="rpanel" id="originPanel">
+        <div class="phdr">
+          <div class="ptitle"><div class="pdot"></div>ORIGIN IP DISCOVERY — UNMASK CDN-FRONTED INFRA</div>
+          <div class="pctrls" style="display:flex;align-items:center;gap:8px;">
+            <button class="btn" id="originBtn" onclick="discoverOrigin()" style="padding:4px 10px;font-size:9px;letter-spacing:1px;">FIND ORIGIN</button>
+            <div class="pcount" id="originCount">──</div>
+          </div>
+        </div>
+        <div class="pbody" id="originBody">
+          <div class="empty" style="padding:18px 14px;line-height:1.6;">
+            Click <strong>FIND ORIGIN</strong> to run four passive techniques (cert SAN search · pre-CDN passive DNS · subdomain DNS-leak probe · MX record resolution) and surface candidate origin IPs behind the Cloudflare/Akamai/Fastly proxy.
+          </div>
+        </div>
+      </div>
       <div class="rpanel" id="threatFeedPanel">
         <div class="phdr"><div class="ptitle"><div class="pdot"></div>THREATFOX / OTX CROSS-REF</div><div class="pctrls"><div class="pcount" id="threatFeedCount">──</div></div></div>
         <div class="pbody" id="threatFeedBody"><div class="empty">—</div></div>
@@ -1253,9 +1267,9 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
       </div>
       <div class="set-status" id="urlscanStatus">No key — using free anonymous tier.</div>
       <div class="set-row" style="margin-top:10px;">
-        <input type="password" class="set-input" id="spyonwebApiKey" placeholder="SpyOnWeb access token (required for SpyOnWeb pivots)" onchange="saveApiKey('spyonweb', this.value)">
+        <input type="password" class="set-input" id="spyonwebApiKey" placeholder="SpyOnWeb access token — registration broken as of 2026 (404 / redirect to homepage)" onchange="saveApiKey('spyonweb', this.value)">
       </div>
-      <div class="set-status" id="spyonwebStatus">Not configured — SpyOnWeb pivot will be skipped.</div>
+      <div class="set-status" id="spyonwebStatus">Not configured — SpyOnWeb pivot will be skipped. Their signup form is currently dead-ended; urlscan alone will carry tracking-ID pivots. Manual web-UI lookups still work at <a href="https://spyonweb.net" target="_blank" rel="noopener" style="color:var(--cyan);">spyonweb.net</a>.</div>
     </div>
 
     <div class="set-sec">
@@ -1904,6 +1918,16 @@ async function startPipeline(){
     if(ipResults.length===1){sel.value='0';renderIpDetail(0);}
   });
 
+  // Auto origin-discovery result — fired by the pipeline's S3b stage when the
+  // resolved IPs are all CDN anycast. If STRONG candidates were found the
+  // pipeline has already substituted them; if not, the rest of the pipeline
+  // continues against the CDN edges. Either way we render the panel so the
+  // analyst sees what happened.
+  es.addEventListener('origin', e => {
+    const d = JSON.parse(e.data);
+    renderOriginCandidates(d, /*auto=*/true);
+  });
+
   // Historical IPs from VT passive DNS + URLScan + current DNS — the primary
   // content of the HOSTING IP HISTORY panel. Each row carries an explicit
   // "ACTIVE NOW" or "LAST HOSTED <date>" status so the analyst can see at a
@@ -2106,7 +2130,8 @@ async function startPipeline(){
   // ─── S19: Platform Pivots (favicon mmh3 / body hash / JARM / reverse-NS) ───
   // Five SSE events feed into one panel. State lives in module scope so
   // re-renders don't drop earlier sections when a later event arrives.
-  const pivotState = { fp: null, sh: null, cs: null, jarm: null, ns: null };
+  const pivotState = { fp: null, sh: null, cs: null, jarm: null, ns: null,
+                        track: null, frag: null };
   // Click-to-copy helper — pivot values are most useful when the analyst
   // can paste them straight into the underlying platform's UI/API.
   function _copyPivot(value, label){
@@ -2151,7 +2176,9 @@ async function startPipeline(){
     const shCount = (sh.matches||[]).length;
     const csCount = (cs.matches||[]).length;
     const nsCount = (ns.flat||[]).length;
-    countEl.textContent = `${shCount}SH · ${csCount}CS · ${jarm.length}J · ${nsCount}NS`;
+    const tCount = ((pivotState.track && pivotState.track.pivots) || []).reduce((a,p)=>a+(p.matches||[]).length,0);
+    const fCount = ((pivotState.frag && pivotState.frag.pivots) || []).reduce((a,p)=>a+(p.matches||[]).length,0);
+    countEl.textContent = `${shCount}SH · ${csCount}CS · ${jarm.length}J · ${nsCount}NS · ${tCount}T · ${fCount}B`;
 
     // ── Seed fingerprint ──
     const fpHdr=document.createElement('div');
@@ -2179,17 +2206,12 @@ async function startPipeline(){
       }
       if(fp.title) _kv(body, 'TITLE', fp.title);
       if(fp.server) _kv(body, 'SERVER', fp.server);
-      // Tracking IDs — high-value pivots; each gets its own row + link to BuiltWith
+      // Tracking IDs — high-value pivots; each gets its own row + link to
+      // the free spyonweb.net web UI (publicwww has the data too but is
+      // paywalled; spyonweb's signup is broken but the search page works).
       for(const t of (fp.tracking_ids||[])){
-        let link = null;
-        if(t.label.startsWith('GA') || t.label==='GA UA' || t.label==='GA4' || t.label==='GTM' || t.label==='Ads'){
-          link = `https://publicwww.com/websites/%22${encodeURIComponent(t.value)}%22/`;
-        } else if(t.label==='FB Pixel'){
-          link = `https://publicwww.com/websites/%22${encodeURIComponent('fbq(%27init%27,%27'+t.value)}%22/`;
-        } else if(t.label==='AdSense' || t.label==='Yandex' || t.label==='Hotjar'){
-          link = `https://publicwww.com/websites/%22${encodeURIComponent(t.value)}%22/`;
-        }
-        _kv(body, t.label, t.value, {copy:true, linkUrl: link, linkLabel: link?'publicwww ↗':''});
+        const link = `https://spyonweb.net/domain/${encodeURIComponent(t.value)}`;
+        _kv(body, t.label, t.value, {copy:true, linkUrl: link, linkLabel: 'spyonweb ↗'});
       }
       if(!fp.tracking_ids || !fp.tracking_ids.length){
         _kv(body, 'TRACKERS', 'none extracted');
@@ -2317,6 +2339,65 @@ async function startPipeline(){
       body.appendChild(row);
       row.addEventListener('click',()=>{ if(typeof openDomainModal==='function') openDomainModal(r.hostname); });
     }
+
+    // ── Tracking-ID urlscan pivots — sister sites whose page HTML contains
+    // the same tracking ID. Same query path the CLUSTER → EXPAND tab uses.
+    if(pivotState.track){
+      const tp = pivotState.track.pivots || [];
+      const tHits = tp.reduce((a, p) => a + ((p.matches||[]).length), 0);
+      const th = document.createElement('div');
+      th.style.cssText='font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--purple);padding:10px 12px 4px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-top:6px;';
+      th.textContent=`TRACKING-ID PIVOTS (urlscan) — ${tHits} sister site${tHits===1?'':'s'} across ${tp.length} ID${tp.length===1?'':'s'}`;
+      body.appendChild(th);
+      if(!tp.length){
+        const e=document.createElement('div');e.className='empty';e.style.padding='8px 12px;font-size:10px;';e.textContent='no tracking IDs extracted from seed';body.appendChild(e);
+      }
+      for(const p of tp){
+        const cap=document.createElement('div');
+        cap.style.cssText='font-family:var(--mono);font-size:9px;color:var(--text-muted);padding:4px 12px;letter-spacing:1px;';
+        const label=(p.id&&p.id.label)||'?';
+        const val=(p.id&&p.id.value)||'?';
+        if(p.skipped) cap.style.color='var(--amber)';
+        cap.textContent=`${label}=${val}  ${p.skipped?'(skipped — '+p.error+')':p.error?'('+p.error+')':`→ ${(p.matches||[]).length} of ${p.total||0} total`}`;
+        body.appendChild(cap);
+        for(const m of (p.matches||[]).slice(0, 10)){
+          const row=document.createElement('div'); row.className='di neighbor-row';
+          row.appendChild(safeText('span','dn', m.host));
+          row.appendChild(safeText('span','badge bs', label));
+          body.appendChild(row);
+          row.addEventListener('click',()=>{ if(typeof openDomainModal==='function') openDomainModal(m.host); });
+        }
+      }
+    }
+
+    // ── Body-fragment urlscan pivots — sister sites whose page HTML
+    // contains the seed's distinctive template strings.
+    if(pivotState.frag){
+      const fp2 = pivotState.frag.pivots || [];
+      const fHits = fp2.reduce((a, p) => a + ((p.matches||[]).length), 0);
+      const fh = document.createElement('div');
+      fh.style.cssText='font-family:var(--mono);font-size:9px;letter-spacing:2px;color:var(--purple);padding:10px 12px 4px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-top:6px;';
+      fh.textContent=`BODY-FRAGMENT PIVOTS (urlscan) — ${fHits} sister site${fHits===1?'':'s'} across ${fp2.length} fragment${fp2.length===1?'':'s'}`;
+      body.appendChild(fh);
+      if(!fp2.length){
+        const e=document.createElement('div');e.className='empty';e.style.padding='8px 12px;font-size:10px;';e.textContent='no distinctive fragments survived blocklist + length filter';body.appendChild(e);
+      }
+      for(const p of fp2){
+        const cap=document.createElement('div');
+        cap.style.cssText='font-family:var(--mono);font-size:9px;color:var(--text-muted);padding:4px 12px;letter-spacing:1px;word-break:break-all;';
+        if(p.skipped) cap.style.color='var(--amber)';
+        const trimmed=(p.fragment||'').slice(0,80)+((p.fragment||'').length>80?'…':'');
+        cap.textContent=`"${trimmed}"  ${p.skipped?'(skipped — '+p.error+')':`→ ${(p.matches||[]).length} of ${p.total||0} total`}`;
+        body.appendChild(cap);
+        for(const m of (p.matches||[]).slice(0, 10)){
+          const row=document.createElement('div'); row.className='di neighbor-row';
+          row.appendChild(safeText('span','dn', m.host));
+          row.appendChild(safeText('span','badge bs', 'BODY'));
+          body.appendChild(row);
+          row.addEventListener('click',()=>{ if(typeof openDomainModal==='function') openDomainModal(m.host); });
+        }
+      }
+    }
   }
   es.addEventListener('contentFingerprint',e=>{ pivotState.fp = JSON.parse(e.data); renderPivotPanel(); });
   es.addEventListener('faviconPivotShodan',e=>{
@@ -2336,6 +2417,22 @@ async function startPipeline(){
     pivotState.ns = JSON.parse(e.data); renderPivotPanel();
     for(const r of (pivotState.ns.flat || [])){
       if(r.hostname) _addToDomainFamily(r.hostname, 'reverse_ns');
+    }
+  });
+  // Standard-mode auto-pivots on tracking IDs and distinctive body fragments —
+  // analogous to the favicon Shodan/Censys pivots above, but unioning via
+  // urlscan instead. Sister hosts get folded into DOMAIN FAMILY so they
+  // surface in the same panel as every other discovery path.
+  es.addEventListener('trackingPivot', e => {
+    pivotState.track = JSON.parse(e.data); renderPivotPanel();
+    for(const p of (pivotState.track.pivots || [])){
+      for(const m of (p.matches || [])){ if(m.host) _addToDomainFamily(m.host, 'tracking_id'); }
+    }
+  });
+  es.addEventListener('bodyFragmentPivot', e => {
+    pivotState.frag = JSON.parse(e.data); renderPivotPanel();
+    for(const p of (pivotState.frag.pivots || [])){
+      for(const m of (p.matches || [])){ if(m.host) _addToDomainFamily(m.host, 'body_fragment'); }
     }
   });
   // S16 recursive subdomain discovery — fold every discovered subdomain into
@@ -2711,11 +2808,12 @@ function renderNeighborPanel(entries){
   const topIP=Object.entries(ipSizes).sort((a,b)=>b[1]-a[1])[0];
   const topIPOrg=topIP?_ipOrg(topIP[0]):null;
   const highCount=sorted.filter(d=>d._scoreInfo.score>=60).length;
-  summary.innerHTML=`REVERSE-IP across <strong style="color:var(--cyan);">${ipCount}</strong> IP${ipCount===1?'':'s'} — <strong style="color:var(--cyan);">${total}</strong> neighbor${total===1?'':'s'}, <strong style="color:var(--amber);">${highCount}</strong> high-similarity (sorted by campaign-likeness vs. seed)`+
+  summary.innerHTML=`REVERSE-IP across <strong style="color:var(--cyan);">${ipCount}</strong> IP${ipCount===1?'':'s'} — <strong style="color:var(--cyan);">${total}</strong> neighbor${total===1?'':'s'}, <strong style="color:var(--amber);">${highCount}</strong> high-similarity (<span id="neighborSortHint">sorting by campaign-likeness · awaiting VT scores</span>)`+
     (topIPOrg?` · top: <strong style="color:var(--amber);">${topIPOrg}</strong>`:'');
   body.appendChild(summary);
   // Rows
-  for(const dom of sorted.slice(0, NEIGHBOR_MAX_ROWS)){
+  const visible = sorted.slice(0, NEIGHBOR_MAX_ROWS);
+  for(const dom of visible){
     const ipArr=dom._ipArr;
     const totalShared=Math.max(...ipArr.map(ip=>ipSizes[ip]||0));
     const scoreInfo=dom._scoreInfo;
@@ -2768,16 +2866,50 @@ function renderNeighborPanel(entries){
     }
     reason.innerHTML=reasonParts.join(' · ');
     body.appendChild(reason);
+    // Refs needed by the post-VT re-sort: badge row + caption row move together,
+    // since the caption sits visually beneath its row and shares its border.
+    dom._row=row; dom._reason=reason;
     // Click → full domain detail modal
     row.addEventListener('click',()=>{ if(typeof openDomainModal==='function') openDomainModal(dom.name); });
     reason.addEventListener('click',()=>{ if(typeof openDomainModal==='function') openDomainModal(dom.name); });
   }
+  let moreNode=null;
   if(sorted.length>NEIGHBOR_MAX_ROWS){
-    const more=document.createElement('div');
-    more.className='empty';
-    more.textContent=`+${sorted.length-NEIGHBOR_MAX_ROWS} more neighbors (see JSON export)`;
-    body.appendChild(more);
+    moreNode=document.createElement('div');
+    moreNode.className='empty';
+    moreNode.textContent=`+${sorted.length-NEIGHBOR_MAX_ROWS} more neighbors (see JSON export)`;
+    body.appendChild(moreNode);
   }
+  // ── Post-render: once all visible rows' VT lookups have resolved, re-sort
+  // the panel by malicious score (then suspicious, then the previous
+  // campaign/IP/alpha tiebreakers) and reorder the DOM nodes in place. Initial
+  // CAMP-sorted render keeps the UI responsive while VT requests trickle in
+  // through the rate-limited queue.
+  Promise.all(visible.map(dom => fetchVtReputation(dom.name).then(d => { dom._vt = d || {}; })))
+    .then(()=>{
+      visible.sort((a,b)=>{
+        const am=(a._vt&&a._vt.malicious)|0, bm=(b._vt&&b._vt.malicious)|0;
+        if(bm!==am) return bm-am;
+        const as=(a._vt&&a._vt.suspicious)|0, bs=(b._vt&&b._vt.suspicious)|0;
+        if(bs!==as) return bs-as;
+        if(b._scoreInfo.score!==a._scoreInfo.score) return b._scoreInfo.score-a._scoreInfo.score;
+        if(b.ips.size!==a.ips.size) return b.ips.size-a.ips.size;
+        return a.name.localeCompare(b.name);
+      });
+      // Move row+caption pairs to the new order. insertBefore(moreNode) keeps
+      // the "+N more" footer last; null target appends to body's end.
+      for(const dom of visible){
+        if(dom._row) body.insertBefore(dom._row, moreNode || null);
+        if(dom._reason) body.insertBefore(dom._reason, moreNode || null);
+      }
+      const hint=document.getElementById('neighborSortHint');
+      const malCount=visible.filter(d=>((d._vt&&d._vt.malicious)|0)>0).length;
+      if(hint){
+        hint.textContent = malCount
+          ? `sorted by VT malicious score · ${malCount} flagged`
+          : 'sorted by VT malicious score · 0 flagged (ties → campaign-likeness)';
+      }
+    });
 }
 
 // INVESTIGATOR
@@ -3743,7 +3875,7 @@ function saveCtProvider(name) {
 function enabledFeatures() {
   return ['reverse_ip','asn_intel','ssl_graph','timeline','correlation',
           'social_fingerprint','subdomain_discovery',
-          'attribution','revalidation'].filter(loadPivotingSetting);
+          'attribution','revalidation','origin_discovery'].filter(loadPivotingSetting);
 }
 
 function savePivotingSetting(feature, enabled) {
@@ -4000,6 +4132,121 @@ function tagPivotColumns(){
 }
 
 // ════════════════════════════════
+// ORIGIN IP DISCOVERY
+// ════════════════════════════════
+async function discoverOrigin(){
+  const seed=(document.getElementById('seedInput')?.value||'').trim().toLowerCase();
+  if(!seed){log('ORIGIN: no seed loaded — run a scan first or enter a domain','err','ORIGIN');return;}
+  const btn=document.getElementById('originBtn');
+  const body=document.getElementById('originBody');
+  const count=document.getElementById('originCount');
+  btn.disabled=true; btn.textContent='WORKING…';
+  count.textContent='…';
+  body.innerHTML='<div class="empty" style="padding:14px;">Running cert search · pDNS · subdomain probe · MX resolution in parallel — this can take 10–30s on a fresh seed.</div>';
+  log(`ORIGIN: discovering origin IPs for ${seed}`,'live','ORIGIN');
+  try{
+    const r=await fetch('/api/origin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({seed})});
+    const data=await r.json();
+    if(!r.ok){
+      body.innerHTML=`<div class="empty" style="padding:14px;color:var(--red);">Error: ${data.error||r.status}</div>`;
+      count.textContent='!';
+      log(`ORIGIN: ${data.error||r.status}`,'err','ORIGIN');
+      return;
+    }
+    renderOriginCandidates(data);
+    const cn=(data.candidates||[]).length;
+    const strong=(data.candidates||[]).filter(c=>c.confidence==='strong').length;
+    log(`ORIGIN: ${cn} candidate(s) — ${strong} strong (≥2 sources)`,'ok','ORIGIN');
+  }catch(e){
+    body.innerHTML=`<div class="empty" style="padding:14px;color:var(--red);">Network error: ${e.message}</div>`;
+    count.textContent='!';
+    log(`ORIGIN: ${e.message}`,'err','ORIGIN');
+  }finally{
+    btn.disabled=false; btn.textContent='FIND ORIGIN';
+  }
+}
+
+function renderOriginCandidates(data, auto){
+  const body=document.getElementById('originBody');
+  const count=document.getElementById('originCount');
+  const cands=data.candidates||[];
+  count.textContent=String(cands.length);
+  body.innerHTML='';
+
+  // AUTO/substitution banner — only appears when the pipeline fired this
+  // automatically (auto=true). Shows clearly whether downstream stages were
+  // re-targeted at origin IPs or continued against the CDN edges.
+  if(auto){
+    const banner=document.createElement('div');
+    const substituted = !!data.substituted;
+    banner.style.cssText=`font-family:var(--mono);font-size:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:${substituted?'rgba(80,255,200,.05)':'rgba(255,170,0,.05)'};color:${substituted?'var(--green)':'var(--amber)'};`;
+    if(substituted){
+      const originIps=cands.filter(c=>c.confidence==='strong').map(c=>c.ip).slice(0,3).join(', ');
+      const cdnIps=(data.original_cdn_ips||[]).join(', ');
+      banner.innerHTML=`<strong>AUTO · SUBSTITUTED</strong> — downstream pivot stages re-targeted from CDN edges (${cdnIps}) onto origin IP(s): <strong>${originIps}</strong>`;
+    }else{
+      banner.innerHTML='<strong>AUTO · NO ORIGIN FOUND</strong> — no STRONG (≥2-source) candidate surfaced; pipeline continued against CDN edges. Manual re-run with FIND ORIGIN may surface single-source LEADS.';
+    }
+    body.appendChild(banner);
+  }
+
+  // Meta line: techniques attempted vs skipped (with reasons)
+  const meta=document.createElement('div');
+  meta.style.cssText='font-family:var(--mono);font-size:9px;color:var(--text-muted);padding:6px 10px;border-bottom:1px solid var(--border);background:rgba(0,212,255,.04);';
+  const run=(data.techniques_run||[]).map(t=>`${t.technique}=${t.kept}`).join(' · ');
+  const skipped=(data.skipped||[]).map(s=>`${s.technique}: ${s.reason.slice(0,60)}`).join(' · ');
+  meta.textContent='Techniques: '+(run||'none')+(skipped?` · skipped: ${skipped}`:'');
+  if(skipped) meta.style.color='var(--amber)';
+  body.appendChild(meta);
+
+  if(!cands.length){
+    const empty=document.createElement('div');empty.className='empty';empty.style.padding='18px 14px;line-height:1.6;';
+    empty.textContent='No origin candidates surfaced. Either the seed isn\'t actually behind a CDN, every leak path also points at CDN ranges (deeply hidden origin), or the cert/pDNS sources lack a key and were skipped (see above).';
+    body.appendChild(empty);
+    return;
+  }
+
+  const tbl=document.createElement('table');
+  tbl.style.cssText='width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;';
+  tbl.innerHTML='<thead><tr style="background:var(--bg2);color:var(--text-dim);">'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);width:80px;">CONFIDENCE</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);width:140px;">CANDIDATE IP</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">ASN / ISP</th>'+
+    '<th style="text-align:left;padding:8px 12px;border-bottom:1px solid var(--border);">SOURCES</th>'+
+    '</tr></thead>';
+  const tb=document.createElement('tbody');
+  cands.forEach(c=>{
+    const tr=document.createElement('tr'); tr.style.borderBottom='1px solid var(--border)';
+    if(c.confidence==='strong') tr.style.background='rgba(80,255,200,.04)';
+    const strong=c.confidence==='strong';
+    const tdConf=document.createElement('td'); tdConf.style.padding='7px 12px';
+    const badge=document.createElement('span');
+    badge.style.cssText=`display:inline-block;padding:2px 8px;font-size:9px;border:1px solid ${strong?'var(--green)':'var(--amber-dim)'};color:${strong?'var(--green)':'var(--amber)'};font-weight:bold;`;
+    badge.textContent=`${strong?'STRONG':'LEAD'} ${c.score}`;
+    tdConf.appendChild(badge);
+
+    const tdIp=document.createElement('td'); tdIp.style.cssText='padding:7px 12px;color:var(--cyan);font-weight:bold;';
+    tdIp.textContent=c.ip;
+
+    const tdAsn=document.createElement('td'); tdAsn.style.cssText='padding:7px 12px;color:var(--text-dim);';
+    const asnBits=[c.asn,c.isp,c.country].filter(Boolean);
+    tdAsn.textContent=asnBits.length?asnBits.join(' · '):'—';
+
+    const tdSrc=document.createElement('td'); tdSrc.style.padding='7px 12px';
+    (c.sources||[]).forEach(src=>{
+      const s=document.createElement('span');
+      s.style.cssText='display:inline-block;padding:1px 6px;margin:1px 4px 1px 0;font-size:9px;border:1px solid var(--purple);color:var(--purple);';
+      s.textContent=src; s.title=(c.evidence||[]).filter(e=>e.toLowerCase().includes(src.replace('_',' '))||e.toLowerCase().includes(src)).join('\n')||src;
+      tdSrc.appendChild(s);
+    });
+
+    tr.appendChild(tdConf); tr.appendChild(tdIp); tr.appendChild(tdAsn); tr.appendChild(tdSrc);
+    tb.appendChild(tr);
+  });
+  tbl.appendChild(tb); body.appendChild(tbl);
+}
+
+// ════════════════════════════════
 // CLUSTER FINGERPRINT
 // ════════════════════════════════
 let clusterData=null;
@@ -4167,6 +4414,11 @@ async function expandCluster(){
       body:JSON.stringify({
         ranked: clusterData.ranked,
         exclude_seeds: (clusterData.seeds||[]).map(s=>s.seed),
+        // Body samples drive the always-on body-fragment phase: each
+        // sample contributes 25-120 char distinctive strings that
+        // expand_cluster queries via urlscan page.html. Catches the
+        // "same kit, per-domain text variations" cluster pattern.
+        body_samples: clusterData.body_samples || [],
         max_features: maxFeat,
         per_feature_cap: cap,
       }),

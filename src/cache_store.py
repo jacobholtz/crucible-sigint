@@ -28,7 +28,12 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-_DB_PATH = Path(__file__).parent / "crucible_cache.sqlite"
+# Cache lives in <project root>/data/ — sibling of src/. mkdir-on-import so
+# a fresh checkout (or fresh `data/` after .gitignore tightening) doesn't
+# trip the connect() with a missing-directory error.
+_DATA_DIR = Path(__file__).parent.parent / "data"
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_DB_PATH = _DATA_DIR / "crucible_cache.sqlite"
 _lock = threading.RLock()
 
 _SCHEMA = """
