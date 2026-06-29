@@ -3,3 +3,5 @@ uvicorn>=0.30.0
 httpx>=0.27.0
 dnstwist>=20250130
 publicsuffix2>=2.20191221
+# CertStream WebSocket client for live CT log monitoring (cert_monitor.py).
+websockets>=12.0

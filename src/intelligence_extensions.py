@@ -1522,6 +1522,44 @@ async def fetch_ip_hosted_domains_intel(
 # Google Threat Intelligence (GTI) — formerly Mandiant Advantage TI
 # ────────────────────────────────────────────────────────────────────
 
+# Process-lifetime cache for /users/me entitlement probe. Keyed by API
+# key so swapping keys at runtime stays correct. Value is True/False
+# (entitlement) or None (probe failed — don't claim either way).
+_GTI_ENTITLEMENT_CACHE: dict[str, bool | None] = {}
+
+
+async def probe_gti_entitlement(api_key: str) -> bool | None:
+    """Probe whether this key carries GTI entitlement by hitting a
+    GTI-only endpoint and checking for a 200. Returns True/False on a
+    successful probe, None on error.
+
+    `/users/me` does NOT reliably expose entitlement (Google SecOps /
+    GTI-tier keys often return empty `privileges` / `user_groups`),
+    so we probe `/api/v3/collections?limit=1` instead — that endpoint
+    is GTI-only and returns 401/403/404 on a standard VT key.
+    """
+    if not api_key:
+        return False
+    if api_key in _GTI_ENTITLEMENT_CACHE:
+        return _GTI_ENTITLEMENT_CACHE[api_key]
+    headers = {"x-apikey": api_key, "Accept": "application/json"}
+    url = "https://www.virustotal.com/api/v3/collections?limit=1"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(url, headers=headers)
+            if r.status_code == 200:
+                _GTI_ENTITLEMENT_CACHE[api_key] = True
+                return True
+            if r.status_code in (401, 403, 404):
+                _GTI_ENTITLEMENT_CACHE[api_key] = False
+                return False
+            # Anything else (5xx, network) is inconclusive — don't cache,
+            # let the next call retry.
+            return None
+    except Exception:
+        return None
+
+
 async def fetch_gti_intel(seed: str, api_key: str) -> dict:
     """
     Pull Google Threat Intelligence data for a domain or IP.
@@ -1685,11 +1723,23 @@ async def fetch_gti_intel(seed: str, api_key: str) -> dict:
         malicious_count = int(last_analysis_stats.get("malicious", 0) or 0)
         total_count = sum(int(v or 0) for v in last_analysis_stats.values())
 
-        # Permissive entitlement detection: any GTI-tier or Mandiant signal.
-        gti_enabled = bool(
+        # Real entitlement comes from /users/me, NOT from "did this seed
+        # happen to have any GTI data attached". A clean/new domain on a
+        # GTI-entitled key will still return zero relationships, and we
+        # don't want to mislabel the key in that case.
+        entitlement = await probe_gti_entitlement(api_key)
+        has_gti_data = bool(
             threat_actors or collections or malware or campaigns or attack_tech
             or mandiant_attrs or gti_assessment
         )
+        # entitlement: True (confirmed) / False (confirmed not) / None (probe
+        # failed — fall back to data-presence as a weaker positive signal).
+        if entitlement is True:
+            gti_enabled = True
+        elif entitlement is False:
+            gti_enabled = False
+        else:
+            gti_enabled = has_gti_data
 
         gui_path = "ip-address" if seed_is_ip else "domain"
 
@@ -1698,6 +1748,7 @@ async def fetch_gti_intel(seed: str, api_key: str) -> dict:
             "seed_kind": "ip" if seed_is_ip else "domain",
             "found": True,
             "gti_enabled": gti_enabled,
+            "gti_data_present": has_gti_data,
             "reputation": attrs.get("reputation"),
             "last_analysis_stats": last_analysis_stats,
             "malicious_vendor_count": malicious_count,
@@ -1722,3 +1773,626 @@ async def fetch_gti_intel(seed: str, api_key: str) -> dict:
         }
     except Exception as e:
         return {"error": f"GTI fetch failed: {e}", "gti_enabled": False}
+
+
+# ────────────────────────────────────────────────────────────────────
+# GTI / VT Enterprise pivot bundle — crowdsourced detections, sibling
+# infrastructure clustering, CT-timing / ACME fingerprinting, and kit
+# path/origin fingerprinting. Together these mirror the "first pivots
+# to run" workflow an analyst chases on an unattributed domain.
+# ────────────────────────────────────────────────────────────────────
+
+# Kit path fingerprints — observable URL paths or hostname patterns that
+# betray a known phishing kit / actor cluster. Used by the kit-fingerprint
+# enumerator below. Each entry: (label, compiled regex, severity, notes).
+_KIT_PATH_FINGERPRINTS = [
+    # Storm-2372 / device-code phish family
+    ("Storm-2372 device-code path",
+     re.compile(r"/common/oauth2/(?:v2\.0/)?deviceauth", re.IGNORECASE),
+     "critical",
+     "Microsoft device-code OAuth path mimicked by Storm-2372 cluster"),
+    ("EntraID device-code lure path",
+     re.compile(r"/(?:devicelogin|device-login|aadlogin)\b", re.IGNORECASE),
+     "high",
+     "Common device-login lure subpath"),
+    # AiTM / EvilProxy / Tycoon family
+    ("AiTM proxy login path",
+     re.compile(r"/(?:owa|adfs)/(?:auth/)?login", re.IGNORECASE),
+     "high",
+     "OWA/ADFS reverse-proxy login path common in AiTM kits"),
+    # Kali365 / Microsoft 365 phishing kit family
+    ("Kali365 kit endpoint",
+     re.compile(r"/(?:kali365|m365kit|o365kit)\b", re.IGNORECASE),
+     "critical",
+     "Named M365 phishing kit endpoint"),
+    # EvilTokens cluster
+    ("EvilTokens-style token capture path",
+     re.compile(r"/(?:eviltokens|tokencap|tokensteal|tokendrop)\b",
+                re.IGNORECASE),
+     "high",
+     "Token-capture endpoint matching EvilTokens-shaped infra"),
+    # Common passkey / MFA-fatigue lure paths
+    ("Passkey enrolment lure path",
+     re.compile(r"/(?:enroll|setup|register)-?passkey\b", re.IGNORECASE),
+     "medium",
+     "Passkey-enrollment lure path"),
+]
+
+# Subdomain naming patterns that betray kit infra / hosted origins. Each
+# pattern is intentionally label-anchored — matches a single subdomain
+# label, not a full hostname suffix.
+_KIT_SUBDOMAIN_PATTERNS = [
+    ("AzureAD/EntraID lookalike",
+     re.compile(r"(?:^|\.)(?:login|signin|sso|aad|entra|account|portal)"
+                r"[a-z0-9\-]*\.", re.IGNORECASE),
+     "medium",
+     "Subdomain mimicking Microsoft auth surface"),
+    ("Microsoft brand mimicry",
+     re.compile(r"(?:^|\.)(?:microsoft|office365|m365|outlook|onedrive)"
+                r"[a-z0-9\-]*\.", re.IGNORECASE),
+     "high",
+     "Brand-mimicry subdomain on actor-controlled apex"),
+    ("Passkey/webauthn lure",
+     re.compile(r"(?:^|\.)(?:passkey|webauthn|fido|mfa|2fa)"
+                r"[a-z0-9\-]*\.", re.IGNORECASE),
+     "medium",
+     "Passkey/WebAuthn lure subdomain"),
+    ("Device-code / oauth2 lure subdomain",
+     re.compile(r"(?:^|\.)(?:device[-_]?auth|device[-_]?code|"
+                r"oauth2?[-_]?device|common[-_]?oauth)"
+                r"[a-z0-9\-]*\.", re.IGNORECASE),
+     "high",
+     "Subdomain naming mirrors Microsoft device-code OAuth flow — Storm-2372 cluster"),
+]
+
+# Hosting origins commonly seen serving phishing kits via CNAME, in HTML
+# referenced hosts, or as direct A-record targets. Substring match.
+_ORIGIN_HOSTING_HINTS = [
+    ("railway.app",          "Railway"),
+    ("up.railway.app",       "Railway"),
+    ("workers.dev",          "Cloudflare Workers"),
+    ("pages.dev",            "Cloudflare Pages"),
+    ("vercel.app",           "Vercel"),
+    ("netlify.app",          "Netlify"),
+    ("onrender.com",         "Render"),
+    ("fly.dev",              "Fly.io"),
+    ("herokuapp.com",        "Heroku"),
+    ("azurewebsites.net",    "Azure App Service"),
+    ("repl.co",              "Replit"),
+    ("glitch.me",            "Glitch"),
+    ("ngrok.io",             "ngrok tunnel"),
+    ("ngrok-free.app",       "ngrok tunnel"),
+    ("trycloudflare.com",    "Cloudflare Tunnel"),
+    ("loca.lt",              "localtunnel"),
+]
+
+
+async def fetch_vt_crowdsourced(seed: str, api_key: str) -> dict:
+    """
+    Pull VT crowdsourced detections + community signals for a domain or IP.
+
+    Sources combined:
+      * `crowdsourced_yara_results` — community YARA hits (rule + ruleset)
+      * `crowdsourced_ids_results`  — Snort/Suricata IDS rule hits
+      * `sigma_analysis_results`    — Sigma rule hits
+      * /comments?limit=40          — Community comments (often the only
+                                      public attribution lives here)
+
+    Some of these only populate on objects VT has scanned recently (or on
+    IPs/domains tied to live samples). Empty arrays are not an error.
+    """
+    if not api_key:
+        return {"error": "VirusTotal API key not configured"}
+
+    seed_is_ip = _is_ip(seed)
+    base = "ip_addresses" if seed_is_ip else "domains"
+    object_url = f"https://www.virustotal.com/api/v3/{base}/{seed}"
+    comments_url = f"{object_url}/comments?limit=40"
+    headers = {"x-apikey": api_key, "Accept": "application/json"}
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            obj_r, com_r = await asyncio.gather(
+                client.get(object_url, headers=headers),
+                client.get(comments_url, headers=headers),
+                return_exceptions=True,
+            )
+
+        yara_hits: list = []
+        ids_hits:  list = []
+        sigma_hits: list = []
+        attrs: dict = {}
+        if not isinstance(obj_r, Exception) and obj_r.status_code == 200:
+            attrs = (((obj_r.json() or {}).get("data") or {}).get("attributes")
+                     or {})
+            for y in (attrs.get("crowdsourced_yara_results") or []):
+                yara_hits.append({
+                    "rule_name": y.get("rule_name") or "",
+                    "ruleset_name": y.get("ruleset_name") or "",
+                    "ruleset_id": y.get("ruleset_id") or "",
+                    "description": (y.get("description") or "")[:300],
+                    "author": y.get("author") or "",
+                    "source": y.get("source") or "",
+                })
+            for i in (attrs.get("crowdsourced_ids_results") or []):
+                ids_hits.append({
+                    "rule_msg": i.get("rule_msg") or "",
+                    "alert_severity": i.get("alert_severity") or "",
+                    "rule_source": i.get("rule_source") or "",
+                    "rule_category": i.get("rule_category") or "",
+                    "rule_id": i.get("rule_id") or "",
+                })
+            sigma = attrs.get("sigma_analysis_results") or []
+            # When VT returns `sigma_analysis_stats` only, surface that too.
+            if not sigma:
+                stats = attrs.get("sigma_analysis_stats")
+                if stats:
+                    sigma_hits.append({
+                        "rule_title": "(aggregate stats only)",
+                        "rule_level": "",
+                        "rule_id": "",
+                        "rule_description": (
+                            f"critical={stats.get('critical',0)} "
+                            f"high={stats.get('high',0)} "
+                            f"medium={stats.get('medium',0)} "
+                            f"low={stats.get('low',0)}"),
+                        "rule_source": "",
+                    })
+            else:
+                for s in sigma:
+                    sigma_hits.append({
+                        "rule_title": s.get("rule_title") or "",
+                        "rule_level": s.get("rule_level") or "",
+                        "rule_id": s.get("rule_id") or "",
+                        "rule_description": (s.get("rule_description") or "")[:300],
+                        "rule_source": s.get("rule_source") or "",
+                    })
+
+        comments: list = []
+        if not isinstance(com_r, Exception) and com_r.status_code == 200:
+            for c in ((com_r.json() or {}).get("data") or []):
+                ca = c.get("attributes") or {}
+                comments.append({
+                    "id": c.get("id"),
+                    "date": _normalize_ts(ca.get("date")),
+                    "text": (ca.get("text") or "")[:800],
+                    "tags": ca.get("tags") or [],
+                    "votes": ca.get("votes") or {},
+                })
+
+        gui_path = "ip-address" if seed_is_ip else "domain"
+        return {
+            "seed": seed,
+            "seed_kind": "ip" if seed_is_ip else "domain",
+            "yara_hits": yara_hits,
+            "ids_hits":  ids_hits,
+            "sigma_hits": sigma_hits,
+            "comments":   comments,
+            "yara_count":  len(yara_hits),
+            "ids_count":   len(ids_hits),
+            "sigma_count": len(sigma_hits),
+            "comment_count": len(comments),
+            "permalink": f"https://www.virustotal.com/gui/{gui_path}/{seed}",
+            "community_permalink":
+                f"https://www.virustotal.com/gui/{gui_path}/{seed}/community",
+        }
+    except Exception as e:
+        return {"error": f"VT crowdsourced fetch failed: {e}"}
+
+
+# Sibling-infrastructure relationships to probe for clustering. Mostly
+# only populated on GTI/Enterprise-entitled keys; harmless to query on a
+# free key (just returns empty arrays / 4xx that get skipped).
+_SIBLING_RELS_DOMAIN = [
+    "siblings",              # VT's explicit "domain siblings" relationship
+    "subdomains",            # subdomain enumeration cap (small page)
+    "resolutions",           # historical IPs
+    "caa_records",           # CAA pivots (kit infra often shares CAA shape)
+    "cname_records",
+    "historical_whois",
+    "historical_ssl_certificates",
+]
+_SIBLING_RELS_IP = [
+    "resolutions",
+    "communicating_files",
+    "historical_ssl_certificates",
+    "historical_whois",
+]
+
+
+async def fetch_vt_sibling_infra(seed: str, api_key: str,
+                                 max_per_rel: int = 25) -> dict:
+    """
+    Cluster sibling infrastructure for a domain (or IP) using VT/GTI
+    relationships.
+
+    For domains: pulls registrar, creation date, historical WHOIS, and walks
+    `siblings`, `resolutions`, `subdomains`, `cname_records`, `caa_records`,
+    and historical SSL — then groups discovered sibling domains by shared
+    registrar and shared ASN of the latest A record.
+
+    For IPs: pulls hosted domains via resolutions, the IP's ASN/org, and
+    groups hosted domains by registrar (best-effort — registrar requires a
+    follow-up call per domain, so we only do this for the top-N).
+    """
+    if not api_key:
+        return {"error": "VirusTotal API key not configured"}
+
+    seed_is_ip = _is_ip(seed)
+    base = "ip_addresses" if seed_is_ip else "domains"
+    obj_url = f"https://www.virustotal.com/api/v3/{base}/{seed}"
+    headers = {"x-apikey": api_key, "Accept": "application/json"}
+    rel_names = _SIBLING_RELS_IP if seed_is_ip else _SIBLING_RELS_DOMAIN
+
+    async def _get(client, url):
+        try:
+            r = await client.get(url, headers=headers)
+            if r.status_code != 200:
+                return None
+            return r.json()
+        except Exception:
+            return None
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            obj_task = _get(client, obj_url)
+            rel_tasks = [
+                _get(client,
+                     f"{obj_url}/{name}?limit={max_per_rel}")
+                for name in rel_names
+            ]
+            obj_data, *rel_data = await asyncio.gather(obj_task, *rel_tasks)
+
+        attrs = ((obj_data or {}).get("data") or {}).get("attributes") or {}
+        rel_payload = dict(zip(rel_names, rel_data))
+
+        def _ids(payload):
+            return [
+                (it.get("id") or "")
+                for it in ((payload or {}).get("data") or [])
+                if it.get("id")
+            ]
+
+        siblings    = _ids(rel_payload.get("siblings"))
+        subdomains  = _ids(rel_payload.get("subdomains"))
+        cnames      = _ids(rel_payload.get("cname_records"))
+        caa_records = [
+            (((it.get("attributes") or {}).get("value")) or it.get("id"))
+            for it in ((rel_payload.get("caa_records") or {}).get("data") or [])
+        ]
+        resolutions = []
+        for it in ((rel_payload.get("resolutions") or {}).get("data") or []):
+            ia = it.get("attributes") or {}
+            resolutions.append({
+                "ip": ia.get("ip_address") or "",
+                "host": ia.get("host_name") or "",
+                "date": _normalize_ts(ia.get("date")),
+            })
+
+        historical_whois = []
+        for it in ((rel_payload.get("historical_whois") or {}).get("data") or []):
+            ia = it.get("attributes") or {}
+            historical_whois.append({
+                "registrar":     ia.get("registrar") or "",
+                "first_seen":    _normalize_ts(ia.get("first_seen_date")),
+                "last_updated":  _normalize_ts(ia.get("last_updated")),
+                "whois_snippet": (ia.get("whois_map") or {}).get(
+                                     "Registrar Name", "") or "",
+            })
+
+        historical_ssl = []
+        for it in (
+            (rel_payload.get("historical_ssl_certificates") or {}).get("data")
+            or []
+        )[:20]:
+            ia = it.get("attributes") or {}
+            issuer = (ia.get("issuer") or {}).get("CN") or \
+                     (ia.get("issuer") or {}).get("O") or ""
+            historical_ssl.append({
+                "thumbprint": ia.get("thumbprint") or it.get("id") or "",
+                "issuer":     issuer,
+                "first_seen": _normalize_ts(ia.get("first_seen_date")),
+                "subject":    (ia.get("subject") or {}).get("CN") or "",
+            })
+
+        # Cluster sibling domains by current registrar where we have it.
+        registrar = attrs.get("registrar") or ""
+        creation_date = attrs.get("creation_date")
+        creation_iso = _normalize_ts(creation_date) if creation_date else ""
+
+        gui_path = "ip-address" if seed_is_ip else "domain"
+        return {
+            "seed": seed,
+            "seed_kind": "ip" if seed_is_ip else "domain",
+            "registrar": registrar,
+            "creation_date": creation_iso,
+            "siblings":    siblings,
+            "subdomains_sample": subdomains,
+            "cname_records":    cnames,
+            "caa_records":      caa_records,
+            "resolutions":      resolutions,
+            "historical_whois": historical_whois,
+            "historical_ssl":   historical_ssl,
+            "sibling_count":    len(siblings),
+            "subdomain_sample_count": len(subdomains),
+            "resolution_count": len(resolutions),
+            "permalink":
+                f"https://www.virustotal.com/gui/{gui_path}/{seed}/relations",
+        }
+    except Exception as e:
+        return {"error": f"VT sibling fetch failed: {e}"}
+
+
+async def fetch_ct_timing(domain: str) -> dict:
+    """
+    Pull CT issuance timing + issuer mix for the apex from crt.sh, then
+    surface heuristics analysts use to separate kit clusters:
+
+      * issuance cadence (count + median gap-days between issuances)
+      * issuer mix (Let's Encrypt vs Google Trust Services vs ZeroSSL vs ...)
+      * SAN siblings — distinct host names co-appearing on the same cert
+      * ACME-client signal — derived from short-lived (~90d) certs from
+        an ACME issuer; kit infra often has machine-issued ACME shape
+
+    Returns a small structured summary, not the raw CT log dump.
+    """
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    apex_url = f"https://crt.sh/?q={domain}&output=json"
+    headers = {"User-Agent": "crucible/1.0 (+threat-intel)"}
+    entries: list = []
+    try:
+        async with httpx.AsyncClient(timeout=20.0, headers=headers) as client:
+            for u in (apex_url, url):
+                try:
+                    r = await client.get(u)
+                    if r.status_code != 200:
+                        continue
+                    data = r.json()
+                    if isinstance(data, list):
+                        entries.extend(data)
+                except Exception:
+                    continue
+    except Exception as e:
+        return {"error": f"CT fetch failed: {e}"}
+
+    if not entries:
+        return {
+            "domain": domain, "entry_count": 0,
+            "issuance_count": 0, "issuers": {}, "san_siblings": [],
+            "acme_signal": False, "note": "No CT entries via crt.sh",
+        }
+
+    # Deduplicate by (id, not_before). crt.sh returns the same cert across
+    # multiple log queries.
+    seen: set = set()
+    deduped: list = []
+    for e in entries:
+        key = (e.get("id") or e.get("serial_number"), e.get("not_before"))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(e)
+
+    # Issuer histogram + ACME-client heuristic
+    from collections import Counter as _C
+    issuer_counts = _C()
+    acme_count = 0
+    apex_suffix = "." + domain.lower()
+    san_counter = _C()
+    timing_iso: list = []
+    short_lived = 0
+
+    for e in deduped:
+        issuer = (e.get("issuer_name") or "").strip()
+        if issuer:
+            issuer_counts[issuer] += 1
+        # ACME-client heuristic: any LE / Google Trust Services / ZeroSSL /
+        # Buypass cert is most likely ACME-issued.
+        if any(s in issuer for s in (
+                "Let's Encrypt", "Google Trust Services", "ZeroSSL",
+                "Buypass", "GTS")):
+            acme_count += 1
+
+        nb = e.get("not_before") or ""
+        na = e.get("not_after") or ""
+        if nb:
+            timing_iso.append(nb[:19].replace(" ", "T"))
+        if nb and na:
+            try:
+                from datetime import datetime as _dt2
+                d_nb = _dt2.fromisoformat(nb.replace(" ", "T")[:19])
+                d_na = _dt2.fromisoformat(na.replace(" ", "T")[:19])
+                if (d_na - d_nb).days <= 100:
+                    short_lived += 1
+            except Exception:
+                pass
+
+        for name in (e.get("name_value") or "").split("\n"):
+            name = name.strip().lstrip("*.").lower()
+            if not name or name == domain.lower():
+                continue
+            if name.endswith(apex_suffix) or name == domain.lower():
+                san_counter[name] += 1
+            else:
+                # SAN sibling from outside the apex — a strong pivot signal.
+                san_counter[name] += 1
+
+    # Cadence: median day-gap between consecutive issuances.
+    timing_iso.sort()
+    gaps_days: list = []
+    if len(timing_iso) > 1:
+        from datetime import datetime as _dt2
+        prev = None
+        for t in timing_iso:
+            try:
+                d = _dt2.fromisoformat(t[:19])
+            except Exception:
+                continue
+            if prev is not None:
+                gaps_days.append((d - prev).days)
+            prev = d
+    median_gap = None
+    if gaps_days:
+        gs = sorted(gaps_days)
+        mid = len(gs) // 2
+        median_gap = gs[mid] if len(gs) % 2 else (gs[mid - 1] + gs[mid]) / 2
+
+    # ACME signal: majority of issuances from ACME issuers AND most certs
+    # have ≤100d lifetime.
+    total = len(deduped)
+    acme_signal = bool(
+        total and acme_count / total >= 0.6 and short_lived / total >= 0.6
+    )
+
+    san_siblings = [
+        {"name": n, "count": c}
+        for n, c in san_counter.most_common(50)
+    ]
+
+    return {
+        "domain": domain,
+        "entry_count": total,
+        "issuance_count": total,
+        "issuers": dict(issuer_counts.most_common(10)),
+        "first_issuance": timing_iso[0] if timing_iso else "",
+        "last_issuance":  timing_iso[-1] if timing_iso else "",
+        "median_gap_days": median_gap,
+        "short_lived_pct": (
+            round(100 * short_lived / total, 1) if total else 0
+        ),
+        "acme_signal": acme_signal,
+        "san_siblings": san_siblings,
+        "san_sibling_count": len(san_siblings),
+        "permalink": f"https://crt.sh/?q={domain}",
+    }
+
+
+def fingerprint_kit_paths(subdomains: list, html_hosts: list | None = None
+                          ) -> dict:
+    """
+    Examine a list of discovered subdomains (and optionally HTML-referenced
+    hosts) for kit / actor / origin fingerprints.
+
+    Returns three buckets:
+      * path_hits      — subdomains whose label matches a known kit path
+                         pattern (apply per host as path comes from HTML later
+                         when available)
+      * subdomain_hits — subdomains matching kit naming conventions
+      * origin_hits    — discovered hosts that point at known cheap-origin
+                         platforms (Railway, Workers, Vercel, ...)
+    """
+    subdomains = [s.lower() for s in (subdomains or [])]
+    html_hosts = [h.lower() for h in (html_hosts or [])]
+    all_hosts = sorted(set(subdomains) | set(html_hosts))
+
+    path_hits: list = []
+    subdomain_hits: list = []
+    origin_hits: list = []
+
+    for host in all_hosts:
+        for label, pattern, sev, note in _KIT_PATH_FINGERPRINTS:
+            if pattern.search(host):
+                path_hits.append({
+                    "host": host, "label": label, "severity": sev,
+                    "note": note,
+                })
+        for label, pattern, sev, note in _KIT_SUBDOMAIN_PATTERNS:
+            if pattern.search(host):
+                subdomain_hits.append({
+                    "host": host, "label": label, "severity": sev,
+                    "note": note,
+                })
+        for needle, provider in _ORIGIN_HOSTING_HINTS:
+            if needle in host:
+                origin_hits.append({
+                    "host": host, "provider": provider,
+                    "needle": needle,
+                })
+                break
+
+    return {
+        "path_hits":      path_hits,
+        "subdomain_hits": subdomain_hits,
+        "origin_hits":    origin_hits,
+        "path_hit_count":      len(path_hits),
+        "subdomain_hit_count": len(subdomain_hits),
+        "origin_hit_count":    len(origin_hits),
+    }
+
+
+async def _scan_html_paths_for_kit_patterns(domain: str,
+                                            timeout_s: float = 8.0) -> list:
+    """Fetch apex + www homepages and pull any URL path segments that match
+    the path-shaped kit fingerprints. Returns a list of {host,label,severity,
+    note,path} hits."""
+    headers = {"User-Agent": "crucible/1.0 (+threat-intel)"}
+    candidates = [f"https://{domain}/", f"https://www.{domain}/",
+                  f"https://{domain}/robots.txt"]
+    bodies: list[tuple[str, bytes]] = []
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s, headers=headers,
+                                     follow_redirects=True) as client:
+            results = await asyncio.gather(
+                *(client.get(u) for u in candidates),
+                return_exceptions=True,
+            )
+            for url, r in zip(candidates, results):
+                if isinstance(r, Exception):
+                    continue
+                if r.status_code >= 400:
+                    continue
+                bodies.append((url, r.content[:1_000_000]))
+    except Exception:
+        return []
+
+    hits: list = []
+    for url, body in bodies:
+        try:
+            text = body.decode("utf-8", "replace")
+        except Exception:
+            continue
+        for label, pattern, sev, note in _KIT_PATH_FINGERPRINTS:
+            for m in pattern.finditer(text):
+                snippet = text[max(0, m.start() - 20):m.end() + 20]
+                hits.append({
+                    "host": url, "label": label, "severity": sev,
+                    "note": note, "match": m.group(0),
+                    "snippet": snippet,
+                })
+                break  # one hit per (url, label) is plenty
+    return hits
+
+
+async def fetch_kit_fingerprint(domain: str, vt_api_key: str = "") -> dict:
+    """
+    Run kit / origin fingerprinting on a domain. Reuses the existing
+    subdomain enumerator (CT + brute + HTML + VT) and the HTML-host scraper,
+    then runs the static fingerprint matchers PLUS an apex/www HTML body
+    scan for path-shaped kit fingerprints (e.g. /common/oauth2/deviceauth).
+    """
+    sub_data, html_hosts_raw, path_hits = await asyncio.gather(
+        fetch_subdomain_enumeration(domain, vt_api_key),
+        fetch_html_referenced_hosts(domain),
+        _scan_html_paths_for_kit_patterns(domain),
+        return_exceptions=True,
+    )
+    if isinstance(sub_data, Exception) or "error" in (sub_data or {}):
+        return {"error": (sub_data or {}).get("error") if isinstance(sub_data, dict)
+                else str(sub_data)}
+
+    html_hosts = list(html_hosts_raw) if not isinstance(html_hosts_raw, Exception) else []
+    subdomains = sub_data.get("subdomains") or []
+
+    fp = fingerprint_kit_paths(subdomains, html_hosts)
+    # Merge HTML-body path hits with the (empty) hostname-based path_hits.
+    if not isinstance(path_hits, Exception) and path_hits:
+        fp["path_hits"] = (fp.get("path_hits") or []) + path_hits
+        fp["path_hit_count"] = len(fp["path_hits"])
+    fp.update({
+        "domain": domain,
+        "subdomain_count": len(subdomains),
+        "html_referenced_count": len(html_hosts),
+        "subdomains_sample": subdomains[:50],
+        "vt_enabled": sub_data.get("vt_enabled", bool(vt_api_key)),
+    })
+    return fp

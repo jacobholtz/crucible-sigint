@@ -272,10 +272,21 @@ body::after{content:'';position:fixed;inset:0;background-image:linear-gradient(r
 .sc-badge.info{color:var(--purple);border-color:var(--purple-dim);}
 
 /* TABS */
-.tabs{display:flex;border-bottom:1px solid var(--border);margin-bottom:18px;}
+.tabs{display:flex;align-items:stretch;border-bottom:1px solid var(--border);margin-bottom:18px;position:relative;}
 .tab{font-family:var(--display);font-size:12px;font-weight:600;letter-spacing:3px;padding:10px 18px;cursor:pointer;color:var(--text-dim);border:none;border-bottom:2px solid transparent;background:none;transition:all .2s;}
 .tab:hover{color:var(--text);}
 .tab.active{color:var(--cyan);border-bottom-color:var(--cyan);}
+/* MORE overflow — secondary / situational tabs are tucked behind a dropdown to keep the primary bar focused on the CTI daily workflow. */
+.tabs-more{position:relative;margin-left:auto;}
+.tabs-more-btn{font-family:var(--display);font-size:12px;font-weight:600;letter-spacing:3px;padding:10px 16px;cursor:pointer;color:var(--text-muted);border:none;border-bottom:2px solid transparent;background:none;transition:color .2s;}
+.tabs-more-btn:hover{color:var(--text);}
+.tabs-more-btn.has-active{color:var(--cyan);border-bottom-color:var(--cyan);}
+.tabs-more-menu{display:none;position:absolute;right:0;top:100%;background:var(--bg);border:1px solid var(--border);border-top:none;min-width:220px;z-index:50;box-shadow:0 8px 24px rgba(0,0,0,.6);}
+.tabs-more.open .tabs-more-menu{display:block;}
+.tabs-more-menu .tab{display:block;width:100%;text-align:left;border-bottom:1px solid var(--border);border-left:2px solid transparent;padding:9px 16px;letter-spacing:2px;}
+.tabs-more-menu .tab:last-child{border-bottom:none;}
+.tabs-more-menu .tab:hover{background:var(--bg2);}
+.tabs-more-menu .tab.active{color:var(--cyan);border-left-color:var(--cyan);border-bottom-color:var(--border);}
 .mode{display:none;}
 .mode.active{display:block;}
 
@@ -611,7 +622,7 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
         <li><strong>Cert Intelligence:</strong> Direct CT query with wildcard support. Use for subdomain enumeration, CA distribution, or historical cert pattern analysis.</li>
         <li><strong>Bulk IOC:</strong> Paste up to 50 domains/IPs. Enriches each with DNS, IP intel, and RDAP. Exports SIEM-ready CSV.</li>
         <li><strong>Revalidation:</strong> Register domains to a watchlist and re-check them on a schedule (hours between checks is configurable per-domain). Surfaces infrastructure <em>decay</em> (NXDOMAIN, IP/ASN changes, takedowns) and <em>reactivation</em>. Pull a DECAY REPORT or RECENT ALERTS at any time. Must be enabled in SETTINGS first.</li>
-        <li><strong>Settings:</strong> Configure optional API keys (Shodan, VirusTotal, AlienVault OTX, abuse.ch, Censys, Cert Spotter), toggle CT sources and their priority order, register pluggable CT providers (scantower.io, Cloudflare Radar) via URL template + bearer key, and enable the revalidation scheduler.</li>
+        <li><strong>Settings:</strong> Configure optional API keys (Shodan, VirusTotal, AlienVault OTX, abuse.ch, Censys, Cert Spotter), toggle CT sources and their priority order, register pluggable CT providers (scantower.io) via URL template + bearer key, and enable the revalidation scheduler.</li>
       </ul>
     </div>
 
@@ -749,7 +760,7 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
       <ul>
         <li><strong>Core sources (free, no auth):</strong> Cert Spotter, certkit.io, crt.sh (CT logs), freeipapi.com (IP intel), dns.google (DoH), rdap.org (registration), urlscan.io (historical scans).</li>
         <li><strong>Optional sources (free key, configured in SETTINGS):</strong> Shodan (open ports / banners), VirusTotal (passive DNS, detections), AlienVault OTX (IOC pulses), abuse.ch ThreatFox / URLHaus / MalwareBazaar (single Auth-Key), Censys (substring brand search).</li>
-        <li><strong>Pluggable CT providers:</strong> scantower.io and Cloudflare Radar are configured per-provider with an API key + URL template containing <code>{q}</code>. CRUCIBLE GETs that URL with <code>Authorization: Bearer &lt;key&gt;</code> and extracts domain-like names from the JSON.</li>
+        <li><strong>Pluggable CT providers:</strong> scantower.io is configured with an API key + URL template containing <code>{q}</code>. CRUCIBLE GETs that URL with <code>Authorization: Bearer &lt;key&gt;</code> and extracts domain-like names from the JSON.</li>
         <li><strong>CT source order:</strong> Cert Spotter is primary, certkit.io and crt.sh are fallbacks, Censys runs when keyed. A crt.sh outage no longer breaks discovery.</li>
         <li><strong>crt.sh flakiness:</strong> Single Postgres instance, goes down under load. If all CT sources fail simultaneously, retry in 5–10 minutes.</li>
         <li><strong>Rate limits:</strong> freeipapi.com and urlscan.io have free-tier limits. The tool includes 300ms delays between IP lookups to respect them.</li>
@@ -796,14 +807,25 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
 </header>
 
 <!-- MODE TABS -->
-<div class="tabs">
-  <button class="tab active" onclick="switchMode('standard')">STANDARD</button>
-  <button class="tab" onclick="switchMode('investigator')">INVESTIGATOR</button>
-  <button class="tab" onclick="switchMode('phishing')">PHISHING / BRAND ABUSE</button>
-  <button class="tab" onclick="switchMode('cert')">CERT INTELLIGENCE</button>
-  <button class="tab" onclick="switchMode('bulk')">BULK IOC</button>
-  <button class="tab" onclick="switchMode('cluster')">CLUSTER FINGERPRINT</button>
-  <button class="tab" onclick="switchMode('settings')">SETTINGS</button>
+<!-- Primary CTI-workflow tabs first; situational/historical tabs are tucked under MORE ▾. -->
+<div class="tabs" id="tabsBar">
+  <button class="tab active" data-mode="standard" onclick="switchMode('standard')">INVESTIGATE</button>
+  <button class="tab" data-mode="gti"      onclick="switchMode('gti')">GTI PIVOTS</button>
+  <button class="tab" data-mode="cluster"  onclick="switchMode('cluster')">CLUSTER</button>
+  <button class="tab" data-mode="actors"   onclick="switchMode('actors')">ACTORS</button>
+  <button class="tab" data-mode="hunts"    onclick="switchMode('hunts')">HUNTS</button>
+  <button class="tab" data-mode="settings" onclick="switchMode('settings')">SETTINGS</button>
+
+  <div class="tabs-more" id="tabsMore">
+    <button class="tabs-more-btn" id="tabsMoreBtn" onclick="toggleTabsMore(event)">MORE ▾</button>
+    <div class="tabs-more-menu">
+      <button class="tab" data-mode="investigator" onclick="switchMode('investigator')">INVESTIGATOR</button>
+      <button class="tab" data-mode="phishing"     onclick="switchMode('phishing')">PHISHING / BRAND ABUSE</button>
+      <button class="tab" data-mode="cert"         onclick="switchMode('cert')">CERT INTELLIGENCE</button>
+      <button class="tab" data-mode="bulk"         onclick="switchMode('bulk')">BULK IOC</button>
+      <button class="tab" data-mode="active"       onclick="switchMode('active')">ACTIVE SCAN</button>
+    </div>
+  </div>
 </div>
 
 <!-- API CHIPS (collapsed by default) -->
@@ -1149,94 +1171,303 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
   </div>
 </div>
 
+<!-- ══ GTI PIVOTS MODE ══ -->
+<div class="mode" id="mode-gti">
+  <div style="background:rgba(160,120,255,.04);border:1px solid rgba(160,120,255,.4);border-left:3px solid var(--purple);padding:10px 16px;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.7;">
+    <strong style="color:var(--purple);">GTI / VT ENTERPRISE PIVOTS</strong> — first-five pivots to run on an unattributed domain. Sibling clustering by registrar / ASN / WHOIS, crowdsourced YARA + Sigma + community comments (often the only public attribution), CT issuance timing + ACME-client signal (separates Kali365 vs EvilTokens vs Storm-2372-adjacent infra), and kit path / cheap-origin fingerprinting on enumerated subdomains.
+  </div>
+
+  <div class="ipanel" data-lbl="GTI SEED">
+    <div class="ilabel">// SEED — DOMAIN OR IP TO PIVOT FROM</div>
+    <div class="irow">
+      <div class="iwrap"><span class="ipfx">◈</span>
+        <input class="seed" id="gtiSeed" placeholder="example.com" spellcheck="false" autocorrect="off" autocapitalize="off">
+      </div>
+      <button class="btn" id="gtiRunBtn" onclick="runGtiPivots()" style="padding:9px 18px;">RUN ALL PIVOTS</button>
+    </div>
+    <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn" onclick="runGtiOne('graph')"      style="padding:5px 10px;font-size:10px;">RELATIONSHIPS</button>
+      <button class="btn" onclick="runGtiOne('crowd')"      style="padding:5px 10px;font-size:10px;">CROWDSOURCED + COMMENTS</button>
+      <button class="btn" onclick="runGtiOne('siblings')"   style="padding:5px 10px;font-size:10px;">SIBLING INFRA</button>
+      <button class="btn" onclick="runGtiOne('ct')"         style="padding:5px 10px;font-size:10px;">CT TIMING / ACME</button>
+      <button class="btn" onclick="runGtiOne('kit')"        style="padding:5px 10px;font-size:10px;">KIT FINGERPRINT</button>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-hdr"><div class="log-title">GTI PIVOT LOG</div><span id="gtiProg" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);">READY</span></div>
+    <div class="log-body" id="gtiLog"><div class="ll info"><span class="lts">──:──:──</span><span class="lst">[READY]</span><span class="lm">Enter a seed. Pivots run in parallel — relationships, crowdsourced detections, sibling infra, CT timing, kit fingerprint.</span></div></div>
+  </div>
+
+  <div class="rpanel" id="gtiFindingsPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>GTI FINDINGS — promoted from all pivots</div><div class="pcount" id="gtiFindingsCount">0</div></div>
+    <div class="pbody" id="gtiFindingsBody" style="padding:0;"></div>
+  </div>
+
+  <div class="rpanel" id="gtiGraphPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>RELATIONSHIPS GRAPH — threat actors / malware / campaigns / Mandiant attribution</div><div class="pcount" id="gtiGraphCount">0</div></div>
+    <div class="pbody" id="gtiGraphBody" style="padding:10px 14px;"></div>
+  </div>
+
+  <div class="rpanel" id="gtiCrowdPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>CROWDSOURCED — YARA / IDS / SIGMA / COMMENTS</div><div class="pcount" id="gtiCrowdCount">0</div></div>
+    <div class="pbody" id="gtiCrowdBody" style="padding:10px 14px;"></div>
+  </div>
+
+  <div class="rpanel" id="gtiSiblingsPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>SIBLING INFRASTRUCTURE — registrar / WHOIS / CAA / CNAME / SSL / resolutions</div><div class="pcount" id="gtiSiblingsCount">0</div></div>
+    <div class="pbody" id="gtiSiblingsBody" style="padding:10px 14px;"></div>
+  </div>
+
+  <div class="rpanel" id="gtiCtPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>CT ISSUANCE TIMING — issuers / SAN siblings / ACME signal</div><div class="pcount" id="gtiCtCount">0</div></div>
+    <div class="pbody" id="gtiCtBody" style="padding:10px 14px;"></div>
+  </div>
+
+  <div class="rpanel" id="gtiKitPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>KIT FINGERPRINT — paths / subdomain patterns / cheap-origin hosts</div><div class="pcount" id="gtiKitCount">0</div></div>
+    <div class="pbody" id="gtiKitBody" style="padding:10px 14px;"></div>
+  </div>
+</div>
+
+<!-- ══ ACTORS MODE ══ -->
+<div class="mode" id="mode-actors">
+  <!-- LIST VIEW — visible by default; replaced by detail view on drill-in. -->
+  <div id="actorListView">
+    <div style="background:rgba(255,170,0,.04);border:1px solid var(--amber-dim);border-left:3px solid var(--amber);padding:10px 16px;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.7;">
+      <strong style="color:var(--amber);">ACTOR PROFILES</strong> — campaign/actor dossiers built up over time. Each profile carries aliases, motivation, origin, target sectors, external references, and a structured evidence timeline. Click any profile to open the full dossier.
+    </div>
+
+    <div class="ipanel" data-lbl="NEW PROFILE" id="actorNewFormPanel" style="display:none;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:start;">
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// NAME</div>
+          <input id="actorNewName" class="seed" placeholder="actor or campaign name" style="width:100%;padding:8px 10px;">
+        </div>
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// ALIASES (comma-separated)</div>
+          <input id="actorNewAliases" class="seed" placeholder="actor aliases, comma-separated" style="width:100%;padding:8px 10px;">
+        </div>
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// TAGS (comma-separated)</div>
+          <input id="actorNewTags" class="seed" placeholder="phishing, aitm, sector-targeting" style="width:100%;padding:8px 10px;">
+        </div>
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// SEVERITY</div>
+          <select id="actorNewSeverity" style="background:var(--bg2);border:1px solid var(--border);color:var(--cyan);font-family:var(--mono);font-size:11px;padding:7px 8px;outline:none;">
+            <option value="">—</option>
+            <option value="critical">critical</option>
+            <option value="high" selected>high</option>
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+          </select>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;margin-top:10px;">
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// MOTIVATION</div>
+          <select id="actorNewMotivation" style="background:var(--bg2);border:1px solid var(--border);color:var(--cyan);font-family:var(--mono);font-size:11px;padding:7px 8px;outline:none;width:100%;">
+            <option value="">—</option>
+            <option value="state-sponsored">state-sponsored</option>
+            <option value="financial">financial</option>
+            <option value="hacktivism">hacktivism</option>
+            <option value="ideological">ideological</option>
+            <option value="insider">insider</option>
+            <option value="unknown">unknown</option>
+          </select>
+        </div>
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// ORIGIN (ISO-2 or free)</div>
+          <input id="actorNewOrigin" class="seed" placeholder="RU, CN, KP, IR, unattributed" style="width:100%;padding:8px 10px;">
+        </div>
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// FIRST SEEN</div>
+          <input id="actorNewFirstSeen" class="seed" placeholder="2026-06-16" style="width:100%;padding:8px 10px;">
+        </div>
+        <div>
+          <div class="ilabel" style="margin-bottom:4px;">// LAST SEEN</div>
+          <input id="actorNewLastSeen" class="seed" placeholder="2026-06-28" style="width:100%;padding:8px 10px;">
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <div class="ilabel" style="margin-bottom:4px;">// TARGETS (comma-separated sectors/regions/orgs)</div>
+        <input id="actorNewTargets" class="seed" placeholder="sectors, regions, organizations (comma-separated)" style="width:100%;padding:8px 10px;">
+      </div>
+      <div style="margin-top:8px;">
+        <div class="ilabel" style="margin-bottom:4px;">// NOTES (markdown: **bold** *italic* [text](url) - bullet `code`)</div>
+        <textarea id="actorNewNotes" class="seed" rows="3" style="width:100%;padding:8px 10px;resize:vertical;"></textarea>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+        <button class="btn" onclick="createActor()" style="padding:8px 16px;">CREATE PROFILE</button>
+        <button class="btn" onclick="toggleActorNewForm(false)" style="padding:8px 16px;">CANCEL</button>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--text-muted);">Profile id is auto-generated from the name (kebab-case).</span>
+      </div>
+    </div>
+
+    <div class="rpanel" id="actorListPanel" style="margin-bottom:10px;">
+      <div class="phdr" style="display:flex;align-items:center;gap:10px;">
+        <div class="ptitle"><div class="pdot"></div>PROFILES</div>
+        <button class="btn" id="actorNewToggleBtn" onclick="toggleActorNewForm()" style="padding:4px 10px;font-size:10px;letter-spacing:2px;">+ NEW</button>
+        <span style="flex:1;"></span>
+        <div class="pcount" id="actorListCount">0</div>
+      </div>
+      <div class="pbody" id="actorListBody" style="padding:0;"></div>
+    </div>
+  </div>
+
+  <!-- DETAIL VIEW — populated and shown by openActorDetail() -->
+  <div id="actorDetailView" style="display:none;">
+    <div style="margin-bottom:14px;display:flex;align-items:center;gap:14px;">
+      <button class="btn" onclick="closeActorDetail()" style="padding:6px 14px;font-size:10px;">← BACK TO PROFILES</button>
+      <span id="actorDetailHeader" style="font-family:var(--display);font-size:18px;letter-spacing:3px;color:var(--cyan);"></span>
+      <span id="actorDetailSeverity"></span>
+      <span id="actorDetailId" style="font-family:var(--mono);font-size:10px;color:var(--text-muted);"></span>
+      <span style="flex:1;"></span>
+      <button class="btn" id="actorDetailDelBtn" style="padding:6px 14px;font-size:10px;border-color:var(--red);color:var(--red);">DELETE</button>
+    </div>
+    <div id="actorDetailBody"></div>
+  </div>
+</div>
+
+<!-- ══ HUNTS MODE ══ -->
+<div class="mode" id="mode-hunts">
+  <div style="background:rgba(80,255,200,.04);border:1px solid var(--cyan-dim);border-left:3px solid var(--cyan);padding:10px 16px;margin-bottom:14px;font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.7;">
+    <strong style="color:var(--cyan);">HUNT RULES</strong> — YARA-style composite rules that match new infrastructure as it appears via CertStream / crt.sh / GTI Livehunt. Matches enter the pending queue (no auto-attribution) until an analyst accepts them. Slack alert fires on every match if <code>SLACK_WEBHOOK_URL</code> is set.
+  </div>
+
+  <div class="ipanel" data-lbl="MONITOR STATUS">
+    <div id="monitorStatusBody" style="display:grid;grid-template-columns:auto 1fr auto 1fr;gap:6px 18px;font-family:var(--mono);font-size:11px;align-items:center;">
+      <!-- populated by loadHunts -->
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+      <button class="btn" onclick="loadHunts()" style="padding:5px 10px;font-size:10px;">REFRESH</button>
+      <button class="btn" onclick="testSlackAlert()" style="padding:5px 10px;font-size:10px;">TEST SLACK</button>
+    </div>
+  </div>
+
+  <div class="ipanel" data-lbl="NEW RULE">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div>
+        <div class="ilabel" style="margin-bottom:4px;">// NAME</div>
+        <input id="huntNewName" class="seed" placeholder="rule name" style="width:100%;padding:8px 10px;">
+      </div>
+      <div>
+        <div class="ilabel" style="margin-bottom:4px;">// BIND TO PROFILE</div>
+        <select id="huntNewProfileId" style="background:var(--bg2);border:1px solid var(--border);color:var(--cyan);font-family:var(--mono);font-size:11px;padding:7px 8px;width:100%;outline:none;">
+          <option value="">— none —</option>
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <div class="ilabel" style="margin-bottom:4px;">// DESCRIPTION</div>
+      <input id="huntNewDesc" class="seed" placeholder="what this rule tracks (free-form)" style="width:100%;padding:8px 10px;">
+    </div>
+    <div style="margin-top:8px;">
+      <div class="ilabel" style="margin-bottom:4px;">// CONDITION (JSON — and/or/not + leaf predicates)</div>
+      <textarea id="huntNewCondition" class="seed" rows="14" spellcheck="false" style="width:100%;padding:10px;resize:vertical;font-family:var(--mono);"></textarea>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--text-muted);margin-top:4px;line-height:1.6;">
+        Fields: <code>host</code>, <code>all_sans</code>, <code>issuer</code>, <code>registrar</code>, <code>creation</code>, <code>ns</code>, <code>record_type</code>, <code>source</code>.
+        Ops: <code>regex</code>, <code>any_regex</code>, <code>icontains</code>, <code>equals</code>, <code>equals_ci</code>, <code>startswith_ci</code>, <code>endswith_ci</code>, <code>in</code>, <code>after</code>, <code>before</code>.
+      </div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;">
+      <button class="btn" onclick="createHunt()" style="padding:8px 16px;">CREATE RULE</button>
+      <button class="btn" onclick="huntLoadExample()" style="padding:5px 10px;font-size:10px;">LOAD EXAMPLE</button>
+    </div>
+  </div>
+
+  <div class="rpanel" id="huntPendingPanel" style="margin-bottom:10px;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>PENDING QUEUE — review &amp; attribute</div><div class="pcount" id="huntPendingCount">0</div></div>
+    <div class="pbody" id="huntPendingBody" style="padding:0;"></div>
+  </div>
+
+  <div class="rpanel" id="huntListPanel" style="margin-bottom:10px;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>RULES</div><div class="pcount" id="huntListCount">0</div></div>
+    <div class="pbody" id="huntListBody" style="padding:0;"></div>
+  </div>
+</div>
+
+<!-- ══ ACTIVE SCAN MODE (scantower.io) ══ -->
+<div class="mode" id="mode-active">
+  <div style="background:rgba(204,31,26,.08);border:1px solid var(--red);border-left:3px solid var(--red);padding:12px 16px;margin-bottom:14px;font-family:var(--mono);font-size:11px;color:var(--text);line-height:1.7;">
+    <strong style="color:var(--red);">⚠ ACTIVE PROBING — sanctioned use only</strong><br>
+    <span style="color:var(--text-dim);">Unlike the rest of CRUCIBLE (passive OSINT), this tab triggers <strong style="color:var(--red);">real HTTP, port, and SSL scans</strong> against the target via scantower.io. Only use on infrastructure you have explicit authorization to probe: your own assets, an in-scope pentest, sanctioned IR. Active scanning against unauthorized infrastructure may violate laws and ToS. The SCAN button stays disabled until you check the authorization box below.</span>
+  </div>
+
+  <div class="ipanel" data-lbl="NEW SCAN">
+    <div class="ilabel">// TARGET URL — must include scheme (https://...)</div>
+    <div class="irow">
+      <div class="iwrap"><span class="ipfx">◈</span>
+        <input class="seed" id="activeUrl" placeholder="https://your-authorised-target.example.com" spellcheck="false" autocorrect="off" autocapitalize="off">
+      </div>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:14px;align-items:center;flex-wrap:wrap;">
+      <label style="display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10px;color:var(--text-dim);">
+        SCAN TYPE
+        <select id="activeScanType" style="background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);color:var(--cyan);font-family:var(--mono);font-size:11px;padding:4px 6px;outline:none;">
+          <option value="full" selected>full</option>
+          <option value="ssl-only">ssl-only</option>
+          <option value="wordpress-security">wordpress-security</option>
+          <option value="malware-scanner">malware-scanner</option>
+        </select>
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text-dim);">
+        <input type="checkbox" id="activePortScan" checked> port scan
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text-dim);">
+        <input type="checkbox" id="activeBrowserScan" checked> browser scan
+      </label>
+      <label style="display:flex;align-items:center;gap:5px;font-family:var(--mono);font-size:10px;color:var(--text-dim);">
+        <input type="checkbox" id="activeMisconfig" checked> misconfiguration
+      </label>
+    </div>
+    <div style="margin-top:14px;padding:10px 12px;background:rgba(204,31,26,.05);border-left:2px solid var(--red);">
+      <label style="display:flex;align-items:flex-start;gap:8px;font-family:var(--mono);font-size:11px;color:var(--text);line-height:1.5;cursor:pointer;">
+        <input type="checkbox" id="activeAuthorized" onchange="updateActiveScanButton()" style="margin-top:3px;">
+        <span>I have explicit authorization to actively probe the target above (own asset, in-scope pentest, sanctioned IR).</span>
+      </label>
+    </div>
+    <div style="margin-top:10px;display:flex;gap:10px;align-items:center;">
+      <button class="btn" id="activeScanBtn" onclick="startActiveScan()" disabled style="padding:9px 18px;opacity:.5;">SCAN</button>
+      <span id="activeScanProg" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);">READY</span>
+    </div>
+  </div>
+
+  <div class="log-panel">
+    <div class="log-hdr"><div class="log-title">SCAN LOG</div></div>
+    <div class="log-body" id="activeLog"><div class="ll info"><span class="lts">──:──:──</span><span class="lst">[READY]</span><span class="lm">scantower.io API client. Enter target URL, check authorization box, click SCAN.</span></div></div>
+  </div>
+
+  <div class="rpanel" id="activeReportPanel" style="margin-bottom:10px;display:none;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>SCAN REPORT — <span id="activeReportTitle" style="color:var(--cyan);"></span></div><div class="pcount" id="activeReportCount">—</div></div>
+    <div class="pbody" id="activeReportBody" style="padding:12px 14px;"></div>
+  </div>
+
+  <div class="rpanel" id="activeHistoryPanel" style="margin-bottom:10px;">
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>RECENT SCANS</div><div class="pcount" id="activeHistoryCount">0</div></div>
+    <div class="pbody" id="activeHistoryBody" style="padding:0;"></div>
+  </div>
+</div>
+
 <!-- ══ SETTINGS MODE ══ -->
 <div class="mode" id="mode-settings">
-  <div class="ipanel" data-lbl="API KEY CONFIGURATION">
-    <div class="ilabel">// CONFIGURE API KEYS FOR ENHANCED INTELLIGENCE SOURCES</div>
-    
-    <div style="margin-bottom: 24px;">
-      <h3 style="font-family:var(--display);font-size:14px;color:var(--cyan);margin-bottom:12px;">Shodan API Configuration</h3>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
-        <input type="password" id="shodanApiKey" placeholder="Enter your Shodan API key" 
-               style="flex:1;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);
-                      color:var(--cyan);font-family:var(--mono);font-size:12px;padding:8px 12px;
-                      outline:none;transition:border-color .2s;" 
-               onchange="saveApiKey('shodan', this.value)">
-        <button class="btn" style="padding:6px 12px;font-size:11px;letter-spacing:2px;" onclick="testApiKey('shodan')">TEST</button>
-      </div>
-      <div id="shodanStatus" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:4px;">
-        API key not configured. Shodan integration will be disabled.
-      </div>
+  <div class="ipanel" data-lbl="API KEYS — sourced from .env">
+    <div class="ilabel">// KEYS ARE LOADED FROM <strong style="color:var(--cyan);">PROJECT_ROOT/.env</strong> AT STARTUP — EDIT THE FILE AND RESTART THE SERVER</div>
+    <div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);line-height:1.6;margin:8px 0 16px;">
+      Copy <code style="color:var(--cyan);">.env.example</code> → <code style="color:var(--cyan);">.env</code> at the project root and populate the keys you have. The file is git-ignored. Shell environment variables win over <code>.env</code> values, so prod deployments can still inject keys via a secrets manager.
     </div>
-
-    <div style="margin-bottom: 24px;">
-      <h3 style="font-family:var(--display);font-size:14px;color:var(--cyan);margin-bottom:12px;">VirusTotal API Configuration</h3>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
-        <input type="password" id="virustotalApiKey" placeholder="Enter your VirusTotal API key" 
-               style="flex:1;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);
-                      color:var(--cyan);font-family:var(--mono);font-size:12px;padding:8px 12px;
-                      outline:none;transition:border-color .2s;" 
-               onchange="saveApiKey('virustotal', this.value)">
-        <button class="btn" style="padding:6px 12px;font-size:11px;letter-spacing:2px;" onclick="testApiKey('virustotal')">TEST</button>
-      </div>
-      <div id="virustotalStatus" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:4px;">
-        API key not configured. VirusTotal integration will be disabled.
-      </div>
+    <div id="envKeyStatusTable" style="display:grid;grid-template-columns:auto auto 1fr;gap:6px 14px;font-family:var(--mono);font-size:11px;align-items:center;">
+      <!-- populated by renderEnvKeyStatus() -->
     </div>
-    
-    <div style="margin-bottom: 24px;">
-      <h3 style="font-family:var(--display);font-size:14px;color:var(--cyan);margin-bottom:12px;">AlienVault OTX API Configuration</h3>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
-        <input type="password" id="otxApiKey" placeholder="Enter your AlienVault OTX API key"
-               style="flex:1;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);
-                      color:var(--cyan);font-family:var(--mono);font-size:12px;padding:8px 12px;
-                      outline:none;transition:border-color .2s;"
-               onchange="saveApiKey('otx', this.value)">
-        <button class="btn" style="padding:6px 12px;font-size:11px;letter-spacing:2px;" onclick="testApiKey('otx')">TEST</button>
-      </div>
-      <div id="otxStatus" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:4px;">
-        API key not configured. AlienVault OTX integration will be disabled.
-      </div>
+    <div style="margin-top:14px;display:flex;gap:8px;align-items:center;">
+      <button class="btn" style="padding:6px 14px;font-size:10px;letter-spacing:2px;" onclick="refreshEnvKeyStatus()">REFRESH STATUS</button>
+      <span style="font-family:var(--mono);font-size:9px;color:var(--text-muted);">After editing .env, restart the server to pick up changes.</span>
     </div>
-
-    <div style="margin-bottom: 24px;">
-      <h3 style="font-family:var(--display);font-size:14px;color:var(--cyan);margin-bottom:12px;">abuse.ch Auth-Key (ThreatFox / URLHaus / MalwareBazaar)</h3>
-      <div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);margin-bottom:6px;line-height:1.5;">
-        Single key shared across all abuse.ch services. Get one free at
-        <span style="color:var(--cyan);">auth.abuse.ch</span> — required by current ThreatFox v1 API.
-        Used to surface sister-domain IOCs co-hosted on the seed's IPs (e.g. *.bet30bet.com listings).
-      </div>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
-        <input type="password" id="abusechApiKey" placeholder="Enter your abuse.ch Auth-Key"
-               style="flex:1;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);
-                      color:var(--cyan);font-family:var(--mono);font-size:12px;padding:8px 12px;
-                      outline:none;transition:border-color .2s;"
-               onchange="saveApiKey('abusech', this.value)">
-        <button class="btn" style="padding:6px 12px;font-size:11px;letter-spacing:2px;" onclick="testApiKey('abusech')">TEST</button>
-      </div>
-      <div id="abusechStatus" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:4px;">
-        API key not configured. ThreatFox cross-reference (S18) will be disabled.
-      </div>
-    </div>
-    
-    <div style="margin-bottom: 24px;">
-      <h3 style="font-family:var(--display);font-size:14px;color:var(--cyan);margin-bottom:12px;">Censys API Configuration</h3>
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:8px;">
-        <input type="password" id="censysApiKey" placeholder="Enter your Censys API ID:key" 
-               style="flex:1;background:var(--bg2);border:1px solid var(--border);border-left:2px solid var(--cyan-dim);
-                      color:var(--cyan);font-family:var(--mono);font-size:12px;padding:8px 12px;
-                      outline:none;transition:border-color .2s;" 
-               onchange="saveApiKey('censys', this.value)">
-        <button class="btn" style="padding:6px 12px;font-size:11px;letter-spacing:2px;" onclick="testApiKey('censys')">TEST</button>
-      </div>
-      <div id="censysStatus" style="font-family:var(--mono);font-size:9px;color:var(--text-dim);margin-top:4px;">
-        API key not configured. Censys integration will be disabled.
-      </div>
-    </div>
+  </div>
 
     <div class="set-sec">
       <div class="set-h">Certificate Transparency Sources</div>
-      <div class="set-desc">CRUCIBLE queries these in order and uses the first that returns results, so a crt.sh outage no longer breaks discovery. Cert Spotter is the primary source (free, reliable); crt.sh is the fallback.</div>
+      <div class="set-desc">CRUCIBLE queries these in order and uses the first that returns results, so a crt.sh outage no longer breaks discovery. Cert Spotter is the primary source (free, reliable); crt.sh is the fallback. Keys for Cert Spotter / Censys come from <code style="color:var(--cyan);">.env</code> — see the API Keys panel above.</div>
       <label class="set-check">
         <input type="checkbox" id="useCertSpotter" onchange="saveCtSetting('certspotter', this.checked)" checked>
         Cert Spotter — primary (free, no key needed)
@@ -1251,40 +1482,15 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
       </label>
       <label class="set-check">
         <input type="checkbox" id="useCensys" onchange="saveCtSetting('censys', this.checked)" checked>
-        Censys — uses your Censys API key (supports substring brand search)
+        Censys — uses your Censys API key from .env (supports substring brand search)
       </label>
-      <div class="set-row" style="margin-top:10px;">
-        <input type="password" class="set-input" id="certspotterApiKey" placeholder="Cert Spotter API key (optional — raises rate limits)" onchange="saveApiKey('certspotter', this.value)">
-      </div>
-      <div class="set-status" id="certspotterStatus">No key — using free unauthenticated tier.</div>
-    </div>
-
-    <div class="set-sec">
-      <div class="set-h">Cluster Auto-Expand Sources</div>
-      <div class="set-desc">Used only by the <strong style="color:var(--cyan);">CLUSTER FINGERPRINT → EXPAND CLUSTER</strong> auto-pivot. urlscan searches the public scan corpus for pages whose HTML contains a tracking ID; SpyOnWeb does reverse Google Analytics / AdSense lookups. Both are optional — urlscan works keyless at a low rate, SpyOnWeb is skipped cleanly without a token. AnalyzeID is not wired in (no documented public API).</div>
-      <div class="set-row" style="margin-top:10px;">
-        <input type="password" class="set-input" id="urlscanApiKey" placeholder="urlscan.io API key (optional — raises search quota)" onchange="saveApiKey('urlscan', this.value)">
-      </div>
-      <div class="set-status" id="urlscanStatus">No key — using free anonymous tier.</div>
-      <div class="set-row" style="margin-top:10px;">
-        <input type="password" class="set-input" id="spyonwebApiKey" placeholder="SpyOnWeb access token — registration broken as of 2026 (404 / redirect to homepage)" onchange="saveApiKey('spyonweb', this.value)">
-      </div>
-      <div class="set-status" id="spyonwebStatus">Not configured — SpyOnWeb pivot will be skipped. Their signup form is currently dead-ended; urlscan alone will carry tracking-ID pivots. Manual web-UI lookups still work at <a href="https://spyonweb.net" target="_blank" rel="noopener" style="color:var(--cyan);">spyonweb.net</a>.</div>
     </div>
 
     <div class="set-sec">
       <div class="set-h">Additional CT Providers (pluggable)</div>
-      <div class="set-desc">scantower.io and Cloudflare don't publish a verified CT query API, so each is configurable: enter the provider's API key and a request URL template containing <strong style="color:var(--cyan);">{q}</strong> (replaced with the domain/brand). CRUCIBLE GETs that URL with <span style="color:var(--text);">Authorization: Bearer &lt;key&gt;</span> and extracts domain-like names from the JSON. A provider activates only when both key and URL are set.</div>
+      <div class="set-desc">scantower.io doesn't publish a verified CT query API, so it's configured via <code style="color:var(--cyan);">.env</code>: set both the key and a request URL template containing <strong style="color:var(--cyan);">{q}</strong> (replaced with the domain/brand). CRUCIBLE GETs that URL with <span style="color:var(--text);">Authorization: Bearer &lt;key&gt;</span> and extracts domain-like names from the JSON. The provider activates only when both <code>SCANTOWER_API_KEY</code> and <code>SCANTOWER_CT_URL</code> env vars are set AND the toggle below is on.</div>
 
-      <label class="set-check"><input type="checkbox" id="useScantower" onchange="saveCtSetting('scantower', this.checked)"> scantower.io</label>
-      <div class="set-row"><input type="password" class="set-input" id="scantowerKey" placeholder="scantower.io API key" onchange="saveCtProvider('scantower')"></div>
-      <div class="set-row"><input type="text" class="set-input" id="scantowerUrl" placeholder="https://scantower.io/api/...?q={q}" onchange="saveCtProvider('scantower')"></div>
-      <div class="set-status" id="scantowerStatus">Not configured.</div>
-
-      <label class="set-check" style="margin-top:12px;"><input type="checkbox" id="useCloudflare" onchange="saveCtSetting('cloudflare', this.checked)"> Cloudflare Radar</label>
-      <div class="set-row"><input type="password" class="set-input" id="cloudflareKey" placeholder="Cloudflare API token" onchange="saveCtProvider('cloudflare')"></div>
-      <div class="set-row"><input type="text" class="set-input" id="cloudflareUrl" placeholder="https://api.cloudflare.com/.../{q}" onchange="saveCtProvider('cloudflare')"></div>
-      <div class="set-status" id="cloudflareStatus">Not configured.</div>
+      <label class="set-check"><input type="checkbox" id="useScantower" onchange="saveCtSetting('scantower', this.checked)"> scantower.io (<code>SCANTOWER_API_KEY</code> + <code>SCANTOWER_CT_URL</code>)</label>
     </div>
 
     <div style="margin-bottom: 24px;">
@@ -1339,18 +1545,6 @@ body.theme-light .vt-badge.vt-malicious:hover{background:rgba(192,21,42,.06);}
     </div>
   </div>
 
-  <div class="log-panel">
-    <div class="log-hdr">
-      <div class="log-title">SETTINGS LOG</div>
-    </div>
-    <div class="log-body" id="settingsLog">
-      <div class="ll info">
-        <span class="lts">──:──:──</span>
-        <span class="lst">[READY]</span>
-        <span class="lm">Configure API keys and CT sources above.</span>
-      </div>
-    </div>
-  </div>
 </div>
 
 </div><!-- /app -->
@@ -1426,10 +1620,35 @@ function loadPhishAndClose(domain){document.getElementById('phishSeed').value=do
 document.addEventListener('keydown',e=>{if(e.key==='Escape'){closeShotLightbox();closeHelp();closeWalletModal();closeDomainModal();}});
 
 function switchMode(m){
-  document.querySelectorAll('.tab').forEach((t,i)=>{const modes=['standard','investigator','phishing','cert','bulk','cluster','settings'];t.classList.toggle('active',modes[i]===m);});
+  // Tabs are flagged active by their data-mode attribute (works for both
+  // the primary bar and the MORE dropdown). The MORE button itself goes
+  // accent-coloured when one of its hidden tabs is the current mode.
+  document.querySelectorAll('#tabsBar .tab').forEach(t=>{
+    t.classList.toggle('active', t.dataset.mode === m);
+  });
+  const moreModes = ['investigator','phishing','cert','bulk','active'];
+  const moreBtn = document.getElementById('tabsMoreBtn');
+  if(moreBtn) moreBtn.classList.toggle('has-active', moreModes.includes(m));
+  // Always collapse the dropdown after a pick.
+  document.getElementById('tabsMore')?.classList.remove('open');
+
   document.querySelectorAll('.mode').forEach(p=>p.classList.remove('active'));
   document.getElementById('mode-'+m)?.classList.add('active');
+  if(m==='actors') loadActors();
+  if(m==='hunts')  loadHunts();
+  if(m==='active') loadActiveHistory();
 }
+
+function toggleTabsMore(ev){
+  ev.stopPropagation();
+  document.getElementById('tabsMore')?.classList.toggle('open');
+}
+// Click anywhere outside the MORE menu closes it.
+document.addEventListener('click', (e) => {
+  const more = document.getElementById('tabsMore');
+  if(!more) return;
+  if(!more.contains(e.target)) more.classList.remove('open');
+});
 function setChip(id,state){const c=document.getElementById('chip-'+id);if(!c)return;c.classList.remove('live','fail','pend');if(state)c.classList.add(state);updateChipsSummary();}
 
 // SOURCES is collapsed by default; clicking the toggle reveals the per-source status chips.
@@ -3713,119 +3932,61 @@ function renderAlerts(alerts){
 // SETTINGS FUNCTIONS
 // ════════════════════════════════
 
-function saveApiKey(service, key) {
-  try {
-    localStorage.setItem(`api_${service}`, key);
-    logSettings(`Saved ${service} API key`);
-    updateApiKeyStatus(service, key ? 'configured' : 'not configured');
-    
-    // Also update the server-side API key
-    fetch(`/api/settings/${service}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({key: key})
-    }).then(response => response.json())
-      .then(data => {
-        if (data.status === 'success') {
-          logSettings(`${service} API key updated on server`);
-        } else {
-          logSettings(`Failed to update ${service} API key on server: ${data.message}`, 'err');
-        }
-      })
-      .catch(error => {
-        logSettings(`Error updating ${service} API key on server: ${error.message}`, 'err');
-      });
-  } catch (e) {
-    logSettings(`Error saving ${service} API key: ${e.message}`, 'err');
+// API keys are loaded server-side from .env (see /api/settings). The browser
+// has no save/load/sync helpers anymore — the Settings tab shows a read-only
+// status grid populated by renderEnvKeyStatus().
+const _ENV_KEY_SERVICES = [
+  {service: 'virustotal',  env: 'VIRUSTOTAL_API_KEY',
+   label: 'VirusTotal / GTI',
+   note:  'Same /api/v3 surface. GTI entitlement detected via /users/me.'},
+  {service: 'shodan',      env: 'SHODAN_API_KEY',
+   label: 'Shodan',
+   note:  'Historical IP/port + JARM fingerprints.'},
+  {service: 'alienvault',  env: 'ALIENVAULT_API_KEY',
+   label: 'AlienVault OTX',
+   note:  'Passive DNS + general pulses.'},
+  {service: 'abusech',     env: 'ABUSECH_API_KEY',
+   label: 'abuse.ch',
+   note:  'ThreatFox / URLHaus / MalwareBazaar (shared key).'},
+  {service: 'censys',      env: 'CENSYS_API_ID + CENSYS_API_SECRET',
+   label: 'Censys',
+   note:  'Search v2 (host + cert). Needs ID and SECRET.'},
+  {service: 'certspotter', env: 'CERTSPOTTER_API_KEY',
+   label: 'Cert Spotter',
+   note:  'Works keyless; key only raises rate limits.'},
+];
+
+async function refreshEnvKeyStatus(){
+  try{
+    const r = await fetch('/api/settings');
+    const data = await r.json();
+    renderEnvKeyStatus(data);
+  } catch(e){
+    logSettings(`Failed to refresh .env key status: ${e.message}`, 'err');
   }
 }
 
-function loadApiKey(service) {
-  try {
-    return localStorage.getItem(`api_${service}`) || '';
-  } catch (e) {
-    return '';
-  }
-}
-
-function testApiKey(service) {
-  const key = loadApiKey(service);
-  if (!key) {
-    logSettings(`${service} API key not configured`, 'warn');
-    return;
-  }
-  
-  logSettings(`Testing ${service} API key...`, 'live');
-  
-  // Test the API key by making a simple request
-  let testUrl = '';
-  let headers = {};
-  
-  if (service === 'shodan') {
-    testUrl = `https://api.shodan.io/shodan/host/8.8.8.8?key=${key}`;
-    headers = {'Accept': 'application/json'};
-  } else if (service === 'virustotal') {
-    testUrl = `https://www.virustotal.com/vtapi/v2/url/report?apikey=${key}&resource=https://google.com`;
-    headers = {'Accept': 'application/json'};
-  } else if (service === 'otx') {
-    testUrl = `https://otx.alienvault.com/api/v1/indicators/domain/google.com/general`;
-    headers = {
-      'Accept': 'application/json',
-      'X-OTX-API-KEY': key
-    };
-  } else if (service === 'censys') {
-    // Parse Censys API ID:key format
-    const parts = key.split(':');
-    if (parts.length === 2) {
-      testUrl = 'https://search.censys.io/api/v2/host/8.8.8.8';
-      headers = {
-        'Accept': 'application/json',
-        'Authorization': 'Basic ' + btoa(parts[0] + ':' + parts[1])
-      };
-    }
-  } else if (service === 'abusech') {
-    // ThreatFox accepts a benign get_iocs probe and returns query_status:ok
-    // when the Auth-Key is valid. We use POST with a 1-day window so the
-    // payload is small. CORS is permitted by abuse.ch on these endpoints.
-    fetch('https://threatfox-api.abuse.ch/api/v1/', {
-      method: 'POST',
-      headers: {'Accept': 'application/json', 'Auth-Key': key, 'Content-Type': 'application/json'},
-      body: JSON.stringify({query: 'get_iocs', days: 1})
-    }).then(r => r.json())
-      .then(d => {
-        if (d && d.query_status === 'ok') {
-          logSettings(`abusech API key validated — ThreatFox returned ${(d.data||[]).length} recent IOC(s)`, 'ok');
-          updateApiKeyStatus('abusech', 'valid');
-        } else {
-          logSettings(`abusech API key validation failed: ${d && d.query_status || 'unknown'}`, 'err');
-          updateApiKeyStatus('abusech', 'not configured');
-        }
-      })
-      .catch(err => {
-        logSettings(`Error testing abusech API key: ${err.message}`, 'err');
-        updateApiKeyStatus('abusech', 'not configured');
-      });
-    return;  // already handled above — skip the generic fetch block
-  }
-  
-  if (testUrl) {
-    fetch(testUrl, {headers: headers})
-      .then(response => {
-        if (response.ok) {
-          logSettings(`${service} API key validated successfully`, 'ok');
-          updateApiKeyStatus(service, 'valid');
-        } else {
-          logSettings(`${service} API key validation failed: ${response.status} ${response.statusText}`, 'err');
-          updateApiKeyStatus(service, 'not configured');
-        }
-      })
-      .catch(error => {
-        logSettings(`Error testing ${service} API key: ${error.message}`, 'err');
-        updateApiKeyStatus(service, 'not configured');
-      });
-  }
+function renderEnvKeyStatus(data){
+  const grid = document.getElementById('envKeyStatusTable');
+  if(!grid) return;
+  grid.innerHTML = '';
+  _ENV_KEY_SERVICES.forEach(({service, env, label, note}) => {
+    const configured = !!data[`${service}_api_key_configured`];
+    const dot = document.createElement('span');
+    dot.textContent = configured ? '●' : '○';
+    dot.style.cssText = `color:${configured ? 'var(--green)' : 'var(--text-muted)'};font-size:14px;`;
+    const name = document.createElement('span');
+    name.textContent = label;
+    name.style.cssText = `color:var(--cyan);`;
+    const detail = document.createElement('span');
+    const envBadge = `<code style="color:var(--text-muted);">${env}</code>`;
+    detail.innerHTML = configured
+      ? `<span style="color:var(--green);">loaded from .env</span> · ${envBadge}<div style="color:var(--text-dim);font-size:10px;margin-top:2px;">${note}</div>`
+      : `<span style="color:var(--text-dim);">not configured</span> · add ${envBadge} to .env<div style="color:var(--text-dim);font-size:10px;margin-top:2px;">${note}</div>`;
+    grid.appendChild(dot);
+    grid.appendChild(name);
+    grid.appendChild(detail);
+  });
 }
 
 function saveCtSetting(source, enabled) {
@@ -3852,26 +4013,9 @@ function loadCtSetting(source) {
 // Build the lists of enabled CT sources / pivoting features to hand to the
 // backend pipeline so the Settings toggles actually take effect.
 function enabledCtSources() {
-  return ['certspotter','crtsh','censys','certkit','scantower','cloudflare'].filter(loadCtSetting);
+  return ['certspotter','crtsh','censys','certkit','scantower'].filter(loadCtSetting);
 }
 
-// Save a pluggable CT provider's key + URL template to the server (and remember
-// the URL locally so it repopulates on reload).
-function saveCtProvider(name) {
-  const key = document.getElementById(`${name}Key`)?.value || '';
-  const url = document.getElementById(`${name}Url`)?.value || '';
-  try { localStorage.setItem(`ctprovider_url_${name}`, url); } catch (e) {}
-  fetch(`/api/settings/ctprovider/${name}`, {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({key, url})
-  }).then(r => r.json())
-    .then(d => {
-      const el = document.getElementById(`${name}Status`);
-      if (el) el.textContent = d.message || '';
-      logSettings(`${name}: ${d.message || 'updated'}`, d.enabled ? 'ok' : 'info');
-    })
-    .catch(e => logSettings(`Error saving ${name} provider: ${e.message}`, 'err'));
-}
 function enabledFeatures() {
   return ['reverse_ip','asn_intel','ssl_graph','timeline','correlation',
           'social_fingerprint','subdomain_discovery',
@@ -3897,25 +4041,6 @@ function syncRevalidationSetting(enabled) {
     .catch(e => logSettings(`Error syncing revalidation setting: ${e.message}`, 'err'));
 }
 
-// The server keeps API keys in memory only, and the browser holds them in localStorage.
-// On every page load we re-push the stored keys so a fresh/restarted server actually has
-// them — otherwise scans log "API key not configured" even though they're saved.
-function syncApiKeysToServer() {
-  let pushed = 0;
-  ['shodan','virustotal','otx','abusech','censys','certspotter'].forEach(service => {
-    const key = loadApiKey(service);
-    if (!key) return;
-    pushed++;
-    fetch(`/api/settings/${service}`, {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({key})
-    }).then(r => r.json())
-      .then(d => { if (d.status === 'success') updateApiKeyStatus(service, 'configured'); })
-      .catch(() => {});
-  });
-  if (pushed) logSettings(`Re-synced ${pushed} saved API key(s) to server`, 'ok');
-}
-
 function loadPivotingSetting(feature) {
   // Unset (never toggled) defaults to enabled, matching the `checked` markup and the
   // backend's all-features-on default — otherwise a fresh load silently disables them.
@@ -3929,47 +4054,24 @@ function loadPivotingSetting(feature) {
 
 function clearAllSettings() {
   try {
-    // Clear API keys
-    localStorage.removeItem('api_shodan');
-    localStorage.removeItem('api_virustotal');
-    localStorage.removeItem('api_otx');
-    localStorage.removeItem('api_abusech');
-    localStorage.removeItem('api_censys');
-    
-    // Clear CT settings
-    ['certspotter','crtsh','censys','certkit','scantower','cloudflare'].forEach(s=>{
+    // API keys live in .env now, not in localStorage. We only clear browser
+    // preferences here: CT toggles + pivoting feature flags + revalidation.
+    ['certspotter','crtsh','censys','certkit','scantower'].forEach(s=>{
       localStorage.removeItem(`ct_${s}`);
-      localStorage.removeItem(`ctprovider_url_${s}`);
     });
-    localStorage.removeItem('api_certspotter');
+    ['reverse_ip','asn_intel','ssl_graph','timeline','correlation',
+     'social_fingerprint','subdomain_discovery','attribution',
+     'revalidation','origin_discovery'].forEach(f=>{
+      localStorage.removeItem(`pivoting_${f}`);
+    });
 
-    // Clear pivoting settings
-    localStorage.removeItem('pivoting_reverse_ip');
-    localStorage.removeItem('pivoting_asn_intel');
-    localStorage.removeItem('pivoting_ssl_graph');
-    localStorage.removeItem('pivoting_timeline');
-    localStorage.removeItem('pivoting_correlation');
-    localStorage.removeItem('pivoting_social_fingerprint');
-    localStorage.removeItem('pivoting_subdomain_discovery');
-    localStorage.removeItem('pivoting_attribution');
-    localStorage.removeItem('pivoting_revalidation');
-    
-    // Reset UI elements
-    document.getElementById('shodanApiKey').value = '';
-    document.getElementById('virustotalApiKey').value = '';
-    document.getElementById('otxApiKey').value = '';
-    const ab=document.getElementById('abusechApiKey');if(ab)ab.value='';
-    document.getElementById('censysApiKey').value = '';
+    // Reset toggles to their defaults.
     document.getElementById('useCertSpotter').checked = true;
     document.getElementById('useCertkit').checked = true;
     document.getElementById('useCrtSh').checked = true;
     document.getElementById('useCensys').checked = true;
-    ['scantower','cloudflare'].forEach(n=>{
-      const cb=document.getElementById('use'+n.charAt(0).toUpperCase()+n.slice(1));if(cb)cb.checked=false;
-      ['Key','Url'].forEach(s=>{const f=document.getElementById(n+s);if(f)f.value='';});
-      const st=document.getElementById(n+'Status');if(st)st.textContent='Not configured.';
-    });
-    const cs=document.getElementById('certspotterApiKey');if(cs)cs.value='';
+    const cbSt=document.getElementById('useScantower');
+    if(cbSt) cbSt.checked = false;
     document.getElementById('enableReverseIP').checked = true;
     document.getElementById('enableAsnIntel').checked = true;
     document.getElementById('enableSslGraph').checked = true;
@@ -3979,68 +4081,32 @@ function clearAllSettings() {
     document.getElementById('enableSubdomainDiscovery').checked = true;
     document.getElementById('enableAttribution').checked = true;
     document.getElementById('enableRevalidation').checked = true;
-    
-    logSettings('All settings cleared', 'ok');
-    updateApiKeyStatus('shodan', 'not configured');
-    updateApiKeyStatus('virustotal', 'not configured');
-    updateApiKeyStatus('otx', 'not configured');
-    updateApiKeyStatus('abusech', 'not configured');
-    updateApiKeyStatus('censys', 'not configured');
+
+    logSettings('Browser preferences cleared (API keys stay in .env)', 'ok');
   } catch (e) {
     logSettings(`Error clearing settings: ${e.message}`, 'err');
   }
 }
 
-function updateApiKeyStatus(service, status) {
-  const statusElement = document.getElementById(`${service}Status`);
-  if (!statusElement) return;
-  
-  switch (status) {
-    case 'configured':
-      statusElement.textContent = 'API key configured. Ready for testing.';
-      statusElement.style.color = 'var(--amber)';
-      break;
-    case 'valid':
-      statusElement.textContent = 'API key validated successfully.';
-      statusElement.style.color = 'var(--green)';
-      break;
-    case 'not configured':
-    default:
-      statusElement.textContent = 'API key not configured. Integration will be disabled.';
-      statusElement.style.color = 'var(--text-dim)';
-      break;
-  }
-}
-
+// SETTINGS LOG was removed for visual cleanup. Kept as a no-op so
+// existing callers (saveCtSetting, syncRevalidationSetting, etc.) don't
+// blow up; debug messages now go to the browser console only.
 function logSettings(msg, type = 'info') {
-  logTo('settingsLog', msg, type, 'SETTINGS');
+  try { (type === 'err' ? console.error : console.log)('[settings]', msg); }
+  catch (_) {}
 }
 
 function loadSettings() {
-  // Load API keys
-  document.getElementById('shodanApiKey').value = loadApiKey('shodan');
-  document.getElementById('virustotalApiKey').value = loadApiKey('virustotal');
-  document.getElementById('otxApiKey').value = loadApiKey('otx');
-  const abEl=document.getElementById('abusechApiKey');if(abEl)abEl.value=loadApiKey('abusech');
-  document.getElementById('censysApiKey').value = loadApiKey('censys');
-  const csk=document.getElementById('certspotterApiKey');if(csk)csk.value=loadApiKey('certspotter');
-  const usk=document.getElementById('urlscanApiKey');if(usk)usk.value=loadApiKey('urlscan');
-  const spk=document.getElementById('spyonwebApiKey');if(spk)spk.value=loadApiKey('spyonweb');
-
-  // Load CT source toggles (free built-in sources)
+  // CT source toggles (free built-in sources)
   document.getElementById('useCertSpotter').checked = loadCtSetting('certspotter');
   document.getElementById('useCertkit').checked = loadCtSetting('certkit');
   document.getElementById('useCrtSh').checked = loadCtSetting('crtsh');
   document.getElementById('useCensys').checked = loadCtSetting('censys');
-  // Pluggable CT providers (toggle + remembered URL; key is write-only on the server)
-  ['scantower','cloudflare'].forEach(n=>{
-    const cb=document.getElementById('use'+n.charAt(0).toUpperCase()+n.slice(1));
-    if(cb)cb.checked=loadCtSetting(n);
-    const urlEl=document.getElementById(n+'Url');
-    try{ if(urlEl) urlEl.value=localStorage.getItem(`ctprovider_url_${n}`)||''; }catch(e){}
-  });
+  // Pluggable CT providers — toggle only (key + URL come from .env).
+  const useScantowerEl = document.getElementById('useScantower');
+  if(useScantowerEl) useScantowerEl.checked = loadCtSetting('scantower');
 
-  // Load pivoting settings
+  // Pivoting feature flags
   document.getElementById('enableReverseIP').checked = loadPivotingSetting('reverse_ip');
   document.getElementById('enableAsnIntel').checked = loadPivotingSetting('asn_intel');
   document.getElementById('enableSslGraph').checked = loadPivotingSetting('ssl_graph');
@@ -4053,27 +4119,17 @@ function loadSettings() {
   // Push the stored revalidation preference to the server so a freshly started
   // backend matches what the browser shows.
   syncRevalidationSetting(loadPivotingSetting('revalidation'));
-  // Re-push saved API keys so the server (which holds them in memory only) has them.
-  syncApiKeysToServer();
 
-  // Update status displays
-  updateApiKeyStatus('shodan', loadApiKey('shodan') ? 'configured' : 'not configured');
-  updateApiKeyStatus('virustotal', loadApiKey('virustotal') ? 'configured' : 'not configured');
-  updateApiKeyStatus('otx', loadApiKey('otx') ? 'configured' : 'not configured');
-  updateApiKeyStatus('abusech', loadApiKey('abusech') ? 'configured' : 'not configured');
-  updateApiKeyStatus('censys', loadApiKey('censys') ? 'configured' : 'not configured');
-  
-  // Load settings from server
+  // Populate the .env key status grid + pull server-side settings snapshot.
   fetch('/api/settings')
-    .then(response => response.json())
+    .then(r => r.json())
     .then(data => {
-      logSettings('Settings loaded from server', 'ok');
+      renderEnvKeyStatus(data);
+      logSettings('Settings loaded from .env via server', 'ok');
     })
     .catch(error => {
       logSettings(`Error loading settings from server: ${error.message}`, 'err');
     });
-  
-  logSettings('Settings loaded', 'ok');
 }
 
 // Load settings when the page loads
@@ -4502,6 +4558,1514 @@ function exportClusterJSON(){
   const out={...clusterData,_meta:{tool:'CRUCIBLE SIGINT — Cluster Fingerprint',generated:new Date().toISOString()}};
   const stamp=Date.now();
   downloadBlob(JSON.stringify(out,null,2),`crucible-cluster-${stamp}.json`,'application/json');
+}
+
+// ════════════════════════════════════════════════════════════
+// GTI PIVOTS — orchestrates the five GTI / VT Enterprise pivots
+// ════════════════════════════════════════════════════════════
+function _gtiSeed(){
+  return (document.getElementById('gtiSeed').value||'').trim();
+}
+function _gtiLog(msg,type='info',stage=''){
+  logTo('gtiLog',msg,type,stage);
+}
+function _gtiSetProg(text){ const p=document.getElementById('gtiProg'); if(p) p.textContent=text; }
+
+function _sevBadge(sev){
+  const s=(sev||'').toLowerCase();
+  const colors={critical:'var(--red)',high:'var(--amber)',medium:'var(--cyan)',low:'var(--text-dim)'};
+  const b=safeText('span','',s.toUpperCase()||'INFO');
+  b.style.cssText=`display:inline-block;padding:1px 6px;border:1px solid ${colors[s]||'var(--border)'};color:${colors[s]||'var(--text-dim)'};font-family:var(--mono);font-size:9px;letter-spacing:1px;margin-right:8px;`;
+  return b;
+}
+
+function _gtiRenderFindings(findings){
+  const body=document.getElementById('gtiFindingsBody');
+  const panel=document.getElementById('gtiFindingsPanel');
+  const cnt=document.getElementById('gtiFindingsCount');
+  if(!findings || !findings.length){ panel.style.display='none'; return; }
+  panel.style.display='';
+  body.innerHTML='';
+  const sevOrder={critical:0,high:1,medium:2,low:3};
+  findings.sort((a,b)=>(sevOrder[a.severity]??9)-(sevOrder[b.severity]??9));
+  cnt.textContent=String(findings.length);
+  findings.forEach(f=>{
+    const row=document.createElement('div');
+    row.style.cssText='padding:8px 12px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;color:var(--text);';
+    const head=document.createElement('div');
+    head.style.cssText='display:flex;align-items:baseline;gap:4px;flex-wrap:wrap;';
+    head.appendChild(_sevBadge(f.severity));
+    const t=safeText('span','',f.title||'');
+    t.style.cssText='color:var(--cyan);font-weight:600;';
+    head.appendChild(t);
+    if(f.url){
+      const a=document.createElement('a');
+      a.href=f.url; a.target='_blank'; a.rel='noopener';
+      a.textContent='↗';
+      a.style.cssText='color:var(--purple);margin-left:6px;text-decoration:none;';
+      head.appendChild(a);
+    }
+    row.appendChild(head);
+    const m=safeText('div','',f.message||'');
+    m.style.cssText='color:var(--text-dim);margin-top:3px;line-height:1.5;';
+    row.appendChild(m);
+    body.appendChild(row);
+  });
+}
+
+const _gtiAllFindings=[];
+
+function _gtiAddFindings(findings){
+  if(!findings) return;
+  findings.forEach(f=>_gtiAllFindings.push(f));
+  _gtiRenderFindings(_gtiAllFindings);
+}
+
+function _gtiClearFindings(){
+  _gtiAllFindings.length=0;
+  document.getElementById('gtiFindingsPanel').style.display='none';
+  document.getElementById('gtiFindingsBody').innerHTML='';
+}
+
+function _kvRow(k,v,opts={}){
+  const row=document.createElement('div');
+  row.style.cssText='display:flex;gap:10px;padding:3px 0;font-family:var(--mono);font-size:11px;';
+  const ks=safeText('span','',k);
+  ks.style.cssText='color:var(--text-muted);min-width:140px;';
+  row.appendChild(ks);
+  const vs=safeText('span','',String(v??''));
+  vs.style.cssText=`color:${opts.color||'var(--text)'};flex:1;word-break:break-all;`;
+  row.appendChild(vs);
+  return row;
+}
+
+function _renderGraph(data){
+  const body=document.getElementById('gtiGraphBody');
+  const panel=document.getElementById('gtiGraphPanel');
+  const cnt=document.getElementById('gtiGraphCount');
+  body.innerHTML='';
+  if(!data || data.error){
+    panel.style.display='';
+    body.appendChild(_kvRow('error', data?data.error:'no data',{color:'var(--red)'}));
+    cnt.textContent='ERR';
+    return;
+  }
+  panel.style.display='';
+  const ta=data.threat_actors||[], mw=data.malware_families||[], cp=data.campaigns||[], col=data.collections||[];
+  const total=ta.length+mw.length+cp.length+col.length;
+  cnt.textContent=String(total);
+  body.appendChild(_kvRow('seed',data.seed||''));
+  body.appendChild(_kvRow('GTI entitlement', data.gti_enabled?'enabled':'standard VT only',{color:data.gti_enabled?'var(--green)':'var(--amber)'}));
+  if(data.reputation!=null) body.appendChild(_kvRow('reputation',data.reputation));
+  if(data.registrar) body.appendChild(_kvRow('registrar',data.registrar));
+  if(data.creation_date) body.appendChild(_kvRow('creation_date',data.creation_date));
+  const groups=[['threat_actors',ta,'var(--red)'],['malware_families',mw,'var(--red)'],['campaigns',cp,'var(--amber)'],['collections',col,'var(--purple)'],['attack_techniques',data.attack_techniques||[],'var(--cyan)']];
+  groups.forEach(([label,arr,color])=>{
+    if(!arr.length) return;
+    const hdr=safeText('div','',label.toUpperCase().replace('_',' ')+' ('+arr.length+')');
+    hdr.style.cssText=`color:${color};font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;`;
+    body.appendChild(hdr);
+    arr.slice(0,15).forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText='padding:4px 8px;margin:2px 0;background:var(--bg2);border-left:2px solid '+color+';font-family:var(--mono);font-size:11px;';
+      const n=safeText('div','',it.name||it.id||'(unnamed)');
+      n.style.cssText='color:var(--text);font-weight:600;';
+      row.appendChild(n);
+      if(it.description){
+        const d=safeText('div','',it.description);
+        d.style.cssText='color:var(--text-dim);font-size:10px;margin-top:2px;line-height:1.4;';
+        row.appendChild(d);
+      }
+      body.appendChild(row);
+    });
+  });
+  if(data.permalink){
+    const a=document.createElement('a');
+    a.href=data.permalink; a.target='_blank'; a.rel='noopener';
+    a.textContent='OPEN ON VIRUSTOTAL ↗';
+    a.style.cssText='display:inline-block;margin-top:10px;color:var(--purple);font-family:var(--mono);font-size:10px;text-decoration:none;';
+    body.appendChild(a);
+  }
+}
+
+function _renderCrowd(data){
+  const body=document.getElementById('gtiCrowdBody');
+  const panel=document.getElementById('gtiCrowdPanel');
+  const cnt=document.getElementById('gtiCrowdCount');
+  body.innerHTML='';
+  if(!data || data.error){
+    panel.style.display='';
+    body.appendChild(_kvRow('error',data?data.error:'no data',{color:'var(--red)'}));
+    cnt.textContent='ERR';
+    return;
+  }
+  panel.style.display='';
+  const total=(data.yara_count||0)+(data.ids_count||0)+(data.sigma_count||0)+(data.comment_count||0);
+  cnt.textContent=String(total);
+  const groups=[
+    ['YARA RULES',data.yara_hits||[],'var(--red)',y=>`${y.rule_name||'?'}  ·  ruleset=${y.ruleset_name||'?'}${y.author?'  ·  by '+y.author:''}`,y=>y.description||''],
+    ['IDS RULES',data.ids_hits||[],'var(--amber)',i=>`${i.rule_msg||'?'}  ·  ${i.rule_source||''}  ·  sev=${i.alert_severity||'?'}`,i=>i.rule_category||''],
+    ['SIGMA HITS',data.sigma_hits||[],'var(--cyan)',s=>`${s.rule_title||'?'}  ·  level=${s.rule_level||'?'}`,s=>s.rule_description||''],
+    ['COMMUNITY COMMENTS',data.comments||[],'var(--purple)',c=>`${c.date||''}  ·  ${(c.tags||[]).join(',')||'no tags'}  ·  votes=${(c.votes&&c.votes.positive)||0}/${(c.votes&&c.votes.negative)||0}`,c=>c.text||'']
+  ];
+  groups.forEach(([label,arr,color,line,desc])=>{
+    if(!arr.length) return;
+    const hdr=safeText('div','',label+' ('+arr.length+')');
+    hdr.style.cssText=`color:${color};font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;`;
+    body.appendChild(hdr);
+    arr.slice(0,15).forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText=`padding:6px 10px;margin:3px 0;background:var(--bg2);border-left:2px solid ${color};font-family:var(--mono);font-size:11px;`;
+      const top=safeText('div','',line(it));
+      top.style.cssText='color:var(--text);';
+      row.appendChild(top);
+      const d=desc(it);
+      if(d){
+        const dn=safeText('div','',d);
+        dn.style.cssText='color:var(--text-dim);font-size:10px;margin-top:3px;line-height:1.5;';
+        row.appendChild(dn);
+      }
+      body.appendChild(row);
+    });
+  });
+  if(data.community_permalink){
+    const a=document.createElement('a');
+    a.href=data.community_permalink; a.target='_blank'; a.rel='noopener';
+    a.textContent='OPEN COMMUNITY TAB ↗';
+    a.style.cssText='display:inline-block;margin-top:10px;color:var(--purple);font-family:var(--mono);font-size:10px;text-decoration:none;';
+    body.appendChild(a);
+  }
+}
+
+function _renderSiblings(data){
+  const body=document.getElementById('gtiSiblingsBody');
+  const panel=document.getElementById('gtiSiblingsPanel');
+  const cnt=document.getElementById('gtiSiblingsCount');
+  body.innerHTML='';
+  if(!data || data.error){
+    panel.style.display='';
+    body.appendChild(_kvRow('error',data?data.error:'no data',{color:'var(--red)'}));
+    cnt.textContent='ERR';
+    return;
+  }
+  panel.style.display='';
+  const total=(data.sibling_count||0)+(data.subdomain_sample_count||0)+(data.resolution_count||0);
+  cnt.textContent=String(total);
+  body.appendChild(_kvRow('seed',data.seed||''));
+  if(data.registrar) body.appendChild(_kvRow('registrar',data.registrar,{color:'var(--cyan)'}));
+  if(data.creation_date) body.appendChild(_kvRow('creation_date',data.creation_date));
+
+  const lists=[
+    ['EXPLICIT SIBLINGS',data.siblings||[],'var(--red)'],
+    ['SUBDOMAINS (sample)',data.subdomains_sample||[],'var(--purple)'],
+    ['CNAME RECORDS',data.cname_records||[],'var(--cyan)'],
+    ['CAA RECORDS',data.caa_records||[],'var(--amber)']
+  ];
+  lists.forEach(([label,arr,color])=>{
+    if(!arr.length) return;
+    const hdr=safeText('div','',label+' ('+arr.length+')');
+    hdr.style.cssText=`color:${color};font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;`;
+    body.appendChild(hdr);
+    arr.slice(0,30).forEach(it=>{
+      const row=safeText('div','',typeof it==='string'?it:JSON.stringify(it));
+      row.style.cssText=`padding:3px 8px;font-family:var(--mono);font-size:11px;color:var(--text);background:var(--bg2);margin:1px 0;border-left:2px solid ${color};`;
+      body.appendChild(row);
+    });
+  });
+
+  const resolutions=data.resolutions||[];
+  if(resolutions.length){
+    const hdr=safeText('div','','HISTORICAL RESOLUTIONS ('+resolutions.length+')');
+    hdr.style.cssText='color:var(--green);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;';
+    body.appendChild(hdr);
+    resolutions.slice(0,25).forEach(r=>{
+      const row=safeText('div','',`${r.date||''}   ${r.ip||''}   ${r.host||''}`);
+      row.style.cssText='padding:3px 8px;font-family:var(--mono);font-size:11px;color:var(--text);background:var(--bg2);margin:1px 0;border-left:2px solid var(--green);';
+      body.appendChild(row);
+    });
+  }
+
+  const ssl=data.historical_ssl||[];
+  if(ssl.length){
+    const hdr=safeText('div','','HISTORICAL SSL CERTS ('+ssl.length+')');
+    hdr.style.cssText='color:var(--cyan);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;';
+    body.appendChild(hdr);
+    ssl.slice(0,15).forEach(c=>{
+      const row=safeText('div','',`${c.first_seen||''}   issuer=${c.issuer||'?'}   CN=${c.subject||'?'}`);
+      row.style.cssText='padding:3px 8px;font-family:var(--mono);font-size:11px;color:var(--text);background:var(--bg2);margin:1px 0;border-left:2px solid var(--cyan);';
+      body.appendChild(row);
+    });
+  }
+
+  const whois=data.historical_whois||[];
+  if(whois.length){
+    const hdr=safeText('div','','HISTORICAL WHOIS ('+whois.length+')');
+    hdr.style.cssText='color:var(--amber);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;';
+    body.appendChild(hdr);
+    whois.slice(0,10).forEach(w=>{
+      const row=safeText('div','',`${w.first_seen||''}   registrar=${w.registrar||'?'}`);
+      row.style.cssText='padding:3px 8px;font-family:var(--mono);font-size:11px;color:var(--text);background:var(--bg2);margin:1px 0;border-left:2px solid var(--amber);';
+      body.appendChild(row);
+    });
+  }
+
+  if(data.permalink){
+    const a=document.createElement('a');
+    a.href=data.permalink; a.target='_blank'; a.rel='noopener';
+    a.textContent='OPEN RELATIONS ON VIRUSTOTAL ↗';
+    a.style.cssText='display:inline-block;margin-top:10px;color:var(--purple);font-family:var(--mono);font-size:10px;text-decoration:none;';
+    body.appendChild(a);
+  }
+}
+
+function _renderCt(data){
+  const body=document.getElementById('gtiCtBody');
+  const panel=document.getElementById('gtiCtPanel');
+  const cnt=document.getElementById('gtiCtCount');
+  body.innerHTML='';
+  if(!data || data.error){
+    panel.style.display='';
+    body.appendChild(_kvRow('error',data?data.error:'no data',{color:'var(--red)'}));
+    cnt.textContent='ERR';
+    return;
+  }
+  panel.style.display='';
+  cnt.textContent=String(data.issuance_count||0);
+  body.appendChild(_kvRow('domain',data.domain||''));
+  body.appendChild(_kvRow('issuance_count',data.issuance_count||0));
+  body.appendChild(_kvRow('first_issuance',data.first_issuance||''));
+  body.appendChild(_kvRow('last_issuance', data.last_issuance ||''));
+  body.appendChild(_kvRow('median_gap_days', data.median_gap_days==null?'n/a':data.median_gap_days));
+  body.appendChild(_kvRow('short_lived_%',  data.short_lived_pct==null?'n/a':data.short_lived_pct+'%'));
+  body.appendChild(_kvRow('ACME signal',    data.acme_signal?'yes — machine-issued shape':'no',{color:data.acme_signal?'var(--amber)':'var(--text-dim)'}));
+
+  const issuers=Object.entries(data.issuers||{});
+  if(issuers.length){
+    const hdr=safeText('div','','ISSUERS');
+    hdr.style.cssText='color:var(--cyan);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;';
+    body.appendChild(hdr);
+    issuers.forEach(([name,c])=>{
+      body.appendChild(_kvRow(name.slice(0,60),c+' cert(s)'));
+    });
+  }
+  const siblings=data.san_siblings||[];
+  if(siblings.length){
+    const hdr=safeText('div','','SAN SIBLINGS ('+siblings.length+')');
+    hdr.style.cssText='color:var(--purple);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;';
+    body.appendChild(hdr);
+    siblings.slice(0,40).forEach(s=>{
+      const row=safeText('div','',`${s.name}   ×${s.count}`);
+      row.style.cssText='padding:3px 8px;font-family:var(--mono);font-size:11px;color:var(--text);background:var(--bg2);margin:1px 0;border-left:2px solid var(--purple);';
+      body.appendChild(row);
+    });
+  }
+  if(data.permalink){
+    const a=document.createElement('a');
+    a.href=data.permalink; a.target='_blank'; a.rel='noopener';
+    a.textContent='OPEN ON crt.sh ↗';
+    a.style.cssText='display:inline-block;margin-top:10px;color:var(--purple);font-family:var(--mono);font-size:10px;text-decoration:none;';
+    body.appendChild(a);
+  }
+}
+
+function _renderKit(data){
+  const body=document.getElementById('gtiKitBody');
+  const panel=document.getElementById('gtiKitPanel');
+  const cnt=document.getElementById('gtiKitCount');
+  body.innerHTML='';
+  if(!data || data.error){
+    panel.style.display='';
+    body.appendChild(_kvRow('error',data?data.error:'no data',{color:'var(--red)'}));
+    cnt.textContent='ERR';
+    return;
+  }
+  panel.style.display='';
+  const total=(data.path_hit_count||0)+(data.subdomain_hit_count||0)+(data.origin_hit_count||0);
+  cnt.textContent=String(total);
+  body.appendChild(_kvRow('domain',data.domain||''));
+  body.appendChild(_kvRow('subdomains_seen', data.subdomain_count||0));
+  body.appendChild(_kvRow('html_referenced', data.html_referenced_count||0));
+
+  const groups=[
+    ['PATH FINGERPRINTS',  data.path_hits||[],     'var(--red)'],
+    ['SUBDOMAIN PATTERNS', data.subdomain_hits||[],'var(--amber)'],
+    ['CHEAP-ORIGIN HOSTS', data.origin_hits||[],   'var(--cyan)']
+  ];
+  groups.forEach(([label,arr,color])=>{
+    if(!arr.length) return;
+    const hdr=safeText('div','',label+' ('+arr.length+')');
+    hdr.style.cssText=`color:${color};font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-top:10px;margin-bottom:4px;`;
+    body.appendChild(hdr);
+    arr.forEach(it=>{
+      const row=document.createElement('div');
+      row.style.cssText=`padding:5px 10px;margin:2px 0;background:var(--bg2);border-left:2px solid ${color};font-family:var(--mono);font-size:11px;`;
+      const head=document.createElement('div');
+      head.style.cssText='display:flex;gap:6px;align-items:baseline;';
+      head.appendChild(_sevBadge(it.severity||'medium'));
+      const h=safeText('span','',it.host||'?');
+      h.style.cssText='color:var(--cyan);';
+      head.appendChild(h);
+      const lbl=safeText('span','','— '+(it.label||it.provider||''));
+      lbl.style.cssText='color:var(--text);';
+      head.appendChild(lbl);
+      row.appendChild(head);
+      if(it.note){
+        const n=safeText('div','',it.note);
+        n.style.cssText='color:var(--text-dim);font-size:10px;margin-top:2px;line-height:1.5;';
+        row.appendChild(n);
+      }
+      body.appendChild(row);
+    });
+  });
+}
+
+async function _gtiFetch(url,label){
+  _gtiLog(`→ ${label}`,'info','GTI');
+  try{
+    const r=await fetch(url);
+    const data=await r.json();
+    if(!r.ok || data.error){
+      _gtiLog(`${label}: ${data.error||('HTTP '+r.status)}`,'err','GTI');
+    } else {
+      _gtiLog(`${label} ok`,'ok','GTI');
+    }
+    return data;
+  }catch(e){
+    _gtiLog(`${label} failed: ${e.message}`,'err','GTI');
+    return {error:e.message};
+  }
+}
+
+async function runGtiOne(which){
+  const seed=_gtiSeed();
+  if(!seed){_gtiLog('enter a seed first','warn');return;}
+  if(which==='graph'){
+    const d=await _gtiFetch('/api/gti/'+encodeURIComponent(seed),'relationships');
+    _renderGraph(d); _gtiAddFindings(d.findings);
+  } else if(which==='crowd'){
+    const d=await _gtiFetch('/api/gti/crowdsourced/'+encodeURIComponent(seed),'crowdsourced');
+    _renderCrowd(d); _gtiAddFindings(d.findings);
+  } else if(which==='siblings'){
+    const d=await _gtiFetch('/api/gti/siblings/'+encodeURIComponent(seed),'siblings');
+    _renderSiblings(d);
+  } else if(which==='ct'){
+    const d=await _gtiFetch('/api/gti/ct-timing/'+encodeURIComponent(seed),'ct-timing');
+    _renderCt(d); _gtiAddFindings(d.findings);
+  } else if(which==='kit'){
+    const d=await _gtiFetch('/api/gti/kit-fingerprint/'+encodeURIComponent(seed),'kit-fingerprint');
+    _renderKit(d); _gtiAddFindings(d.findings);
+  }
+}
+
+async function runGtiPivots(){
+  const seed=_gtiSeed();
+  if(!seed){_gtiLog('enter a seed first','warn');return;}
+  _gtiClearFindings();
+  _gtiSetProg('RUNNING');
+  const btn=document.getElementById('gtiRunBtn'); if(btn){btn.disabled=true;btn.style.opacity='0.6';}
+  _gtiLog(`pivots starting for ${seed}`,'info','GTI');
+  const seedEnc=encodeURIComponent(seed);
+  // Determine if seed is an IP — CT timing + kit fingerprint are domain-only.
+  const isIp=/^\d{1,3}(\.\d{1,3}){3}$/.test(seed) || seed.includes(':');
+  const tasks=[
+    _gtiFetch('/api/gti/'+seedEnc,'relationships').then(d=>{_renderGraph(d); _gtiAddFindings(d.findings);}),
+    _gtiFetch('/api/gti/crowdsourced/'+seedEnc,'crowdsourced').then(d=>{_renderCrowd(d); _gtiAddFindings(d.findings);}),
+    _gtiFetch('/api/gti/siblings/'+seedEnc,'siblings').then(d=>{_renderSiblings(d);}),
+  ];
+  if(!isIp){
+    tasks.push(_gtiFetch('/api/gti/ct-timing/'+seedEnc,'ct-timing').then(d=>{_renderCt(d); _gtiAddFindings(d.findings);}));
+    tasks.push(_gtiFetch('/api/gti/kit-fingerprint/'+seedEnc,'kit-fingerprint').then(d=>{_renderKit(d); _gtiAddFindings(d.findings);}));
+  } else {
+    _gtiLog('IP seed — skipping CT timing & kit fingerprint (domain-only pivots)','info','GTI');
+  }
+  await Promise.all(tasks);
+  _gtiSetProg('DONE');
+  if(btn){btn.disabled=false;btn.style.opacity='';}
+  _gtiLog('all pivots complete','ok','GTI');
+}
+
+// ════════════════════════════════════════════════════════════
+// ACTORS — campaign/actor profile manager (list view ↔ drill-down detail)
+// ════════════════════════════════════════════════════════════
+function _actorJson(method, url, body){
+  const opts = {method, headers:{'Content-Type':'application/json'}};
+  if(body !== undefined) opts.body = JSON.stringify(body);
+  return fetch(url, opts).then(r => r.json().then(d => ({status:r.status, data:d})));
+}
+
+function _sevPill(sev){
+  const colors = {critical:'var(--red)',high:'var(--amber)',medium:'var(--cyan)',low:'var(--text-dim)',''  :'var(--text-muted)'};
+  const c = colors[(sev||'').toLowerCase()] || 'var(--text-muted)';
+  const el = safeText('span','', (sev||'—').toUpperCase());
+  el.style.cssText = `display:inline-block;padding:1px 7px;border:1px solid ${c};color:${c};font-family:var(--mono);font-size:9px;letter-spacing:1px;`;
+  return el;
+}
+
+// Category colour for evidence chips. ioc/ttp/infra/etc. mirror the
+// taxonomies CTI firms use to bucket attribution data.
+function _catPill(cat){
+  const colors = {ioc:'var(--red)',ttp:'var(--amber)',infra:'var(--cyan)',tooling:'var(--purple)',human:'var(--green)',news:'var(--text-dim)',misc:'var(--text-muted)'};
+  const c = colors[(cat||'').toLowerCase()] || 'var(--text-muted)';
+  const el = safeText('span','', (cat||'misc').toUpperCase());
+  el.style.cssText = `display:inline-block;padding:1px 6px;background:rgba(255,255,255,.02);border:1px solid ${c};color:${c};font-family:var(--mono);font-size:9px;letter-spacing:1px;`;
+  return el;
+}
+
+function _confPill(conf){
+  const c = (conf||'').toLowerCase();
+  if(!c) return null;
+  const dots = c === 'high' ? '●●●' : c === 'medium' ? '●●○' : '●○○';
+  const color = c === 'high' ? 'var(--green)' : c === 'medium' ? 'var(--amber)' : 'var(--text-dim)';
+  const el = safeText('span','', `${dots} ${c}`);
+  el.style.cssText = `font-family:var(--mono);font-size:9px;color:${color};letter-spacing:1px;`;
+  return el;
+}
+
+// Minimal markdown → safe HTML. Supports: # headers, **bold**, *italic*,
+// `code`, ```code blocks```, [text](url) links, - bullet lists. Everything
+// else is escaped/preserved. No deps, no innerHTML on user-controlled raw.
+function _mdEscape(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+          .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function _mdInline(s){
+  // Code spans first so we don't run other rules inside them.
+  s = s.replace(/`([^`]+?)`/g, (_, c) =>
+    `<code style="background:var(--bg);padding:1px 5px;border:1px solid var(--border);color:var(--cyan);">${c}</code>`);
+  // Links — only http(s) urls, escape both halves.
+  s = s.replace(/\[([^\]]+?)\]\((https?:\/\/[^)\s]+)\)/g, (_, text, url) =>
+    `<a href="${url}" target="_blank" rel="noopener" style="color:var(--purple);">${text}</a>`);
+  // Bold then italic.
+  s = s.replace(/\*\*([^*]+?)\*\*/g, '<strong style="color:var(--text);">$1</strong>');
+  s = s.replace(/(^|[^*])\*([^*\n]+?)\*(?!\*)/g, '$1<em>$2</em>');
+  return s;
+}
+function renderMarkdown(text){
+  if(!text) return '';
+  const lines = _mdEscape(text).split('\n');
+  const out = [];
+  let inCode = false;
+  let inList = false;
+  const closeList = () => { if(inList){ out.push('</ul>'); inList=false; } };
+  for(const raw of lines){
+    if(raw.startsWith('```')){
+      closeList();
+      if(!inCode){ out.push('<pre style="background:var(--bg);border-left:2px solid var(--cyan-dim);padding:8px 12px;margin:6px 0;color:var(--text);overflow:auto;">'); inCode=true; }
+      else { out.push('</pre>'); inCode=false; }
+      continue;
+    }
+    if(inCode){ out.push(raw); continue; }
+    const hMatch = raw.match(/^(#{1,3})\s+(.*)$/);
+    if(hMatch){
+      closeList();
+      const lvl = hMatch[1].length;
+      const sz = ['16px','14px','12px'][lvl-1];
+      out.push(`<div style="font-family:var(--display);font-size:${sz};letter-spacing:2px;color:var(--cyan);margin:10px 0 4px;">${_mdInline(hMatch[2])}</div>`);
+      continue;
+    }
+    const liMatch = raw.match(/^[-*]\s+(.*)$/);
+    if(liMatch){
+      if(!inList){ out.push('<ul style="margin:4px 0;padding-left:18px;color:var(--text-dim);">'); inList=true; }
+      out.push(`<li>${_mdInline(liMatch[1])}</li>`);
+      continue;
+    }
+    closeList();
+    if(raw.trim() === ''){ out.push('<div style="height:6px;"></div>'); continue; }
+    out.push(`<div style="color:var(--text-dim);line-height:1.55;">${_mdInline(raw)}</div>`);
+  }
+  closeList();
+  if(inCode) out.push('</pre>');
+  return out.join('');
+}
+
+let _actorCache = [];
+
+async function loadActors(){
+  try{
+    const {status, data} = await _actorJson('GET', '/api/actors');
+    if(status !== 200){ throw new Error(data.error || 'load failed'); }
+    _actorCache = data.profiles || [];
+    renderActorList(_actorCache);
+    populateProfileSelect(_actorCache);
+  } catch(e){
+    document.getElementById('actorListBody').innerHTML =
+      `<div style="padding:10px;color:var(--red);font-family:var(--mono);font-size:11px;">${e.message}</div>`;
+  }
+}
+
+function renderActorList(profiles){
+  const body = document.getElementById('actorListBody');
+  const cnt  = document.getElementById('actorListCount');
+  body.innerHTML = '';
+  cnt.textContent = String(profiles.length);
+  if(!profiles.length){
+    body.innerHTML = `<div style="padding:14px;color:var(--text-dim);font-family:var(--mono);font-size:11px;">No profiles yet — create one above.</div>`;
+    return;
+  }
+  profiles.forEach(p => {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer;display:grid;grid-template-columns:auto 1fr auto auto auto;gap:14px;align-items:start;font-family:var(--mono);font-size:11px;transition:background .15s;';
+    row.onmouseenter = () => row.style.background = 'var(--bg2)';
+    row.onmouseleave = () => row.style.background = '';
+    row.onclick = () => openActorDetail(p.id);
+    row.appendChild(_sevPill(p.severity));
+    // Name + id + aliases + tags + targets
+    const main = document.createElement('div');
+    const n = safeText('div','', p.name);
+    n.style.cssText = 'color:var(--cyan);font-weight:600;font-size:13px;';
+    main.appendChild(n);
+    const id = safeText('div','', p.id);
+    id.style.cssText = 'color:var(--text-muted);font-size:9px;margin-top:2px;';
+    main.appendChild(id);
+    if((p.aliases||[]).length){
+      const al = safeText('div','', 'aka: ' + (p.aliases||[]).join(', '));
+      al.style.cssText = 'color:var(--text-dim);font-size:10px;margin-top:3px;font-style:italic;';
+      main.appendChild(al);
+    }
+    const metaLine = [];
+    if(p.motivation)      metaLine.push(p.motivation);
+    if(p.origin_country)  metaLine.push('origin: ' + p.origin_country);
+    if(p.first_seen)      metaLine.push('first: ' + p.first_seen);
+    if(p.last_seen)       metaLine.push('last: ' + p.last_seen);
+    if(metaLine.length){
+      const meta = safeText('div','', metaLine.join('  ·  '));
+      meta.style.cssText = 'color:var(--text-muted);font-size:10px;margin-top:3px;';
+      main.appendChild(meta);
+    }
+    if((p.targets||[]).length){
+      const tg = safeText('div','', 'targets: ' + (p.targets||[]).join(', '));
+      tg.style.cssText = 'color:var(--text-dim);font-size:10px;margin-top:2px;';
+      main.appendChild(tg);
+    }
+    if((p.tags||[]).length){
+      const tags = safeText('div','', (p.tags||[]).map(t => '#'+t).join('  '));
+      tags.style.cssText = 'color:var(--purple);font-size:10px;margin-top:3px;';
+      main.appendChild(tags);
+    }
+    row.appendChild(main);
+    const ec = safeText('div','', `${p.evidence_count} evidence`);
+    ec.style.cssText = 'color:var(--text);';
+    row.appendChild(ec);
+    const rc = safeText('div','', `${p.reference_count||0} refs`);
+    rc.style.cssText = 'color:var(--purple);';
+    row.appendChild(rc);
+    const last = safeText('div','', p.last_evidence_at ? `last: ${p.last_evidence_at.slice(0,10)}` : '—');
+    last.style.cssText = 'color:var(--text-muted);font-size:10px;';
+    row.appendChild(last);
+    body.appendChild(row);
+  });
+}
+
+// Toggle the NEW PROFILE form's visibility. `force` overrides the
+// auto-toggle behaviour — pass `true` to open or `false` to close.
+function toggleActorNewForm(force){
+  const panel = document.getElementById('actorNewFormPanel');
+  const btn   = document.getElementById('actorNewToggleBtn');
+  if(!panel) return;
+  const willOpen = (force === true) ? true
+                 : (force === false) ? false
+                 : panel.style.display === 'none';
+  panel.style.display = willOpen ? '' : 'none';
+  if(btn){
+    btn.textContent = willOpen ? '× CANCEL' : '+ NEW';
+  }
+  if(willOpen){
+    // Focus the name input so the analyst can type immediately.
+    setTimeout(() => document.getElementById('actorNewName')?.focus(), 0);
+  }
+}
+
+async function createActor(){
+  const name = document.getElementById('actorNewName').value.trim();
+  if(!name){ alert('Name is required'); return; }
+  const body = {
+    name,
+    aliases:        document.getElementById('actorNewAliases').value,
+    tags:           document.getElementById('actorNewTags').value,
+    severity:       document.getElementById('actorNewSeverity').value,
+    motivation:     document.getElementById('actorNewMotivation').value,
+    origin_country: document.getElementById('actorNewOrigin').value.trim(),
+    first_seen:     document.getElementById('actorNewFirstSeen').value.trim(),
+    last_seen:      document.getElementById('actorNewLastSeen').value.trim(),
+    targets:        document.getElementById('actorNewTargets').value,
+    notes:          document.getElementById('actorNewNotes').value,
+  };
+  const {status, data} = await _actorJson('POST', '/api/actors', body);
+  if(status !== 200){ alert(data.error || 'create failed'); return; }
+  ['actorNewName','actorNewAliases','actorNewTags','actorNewOrigin',
+   'actorNewFirstSeen','actorNewLastSeen','actorNewTargets','actorNewNotes'
+  ].forEach(id => { const el=document.getElementById(id); if(el) el.value=''; });
+  // Collapse the form once the profile is created — keeps the list-view
+  // tidy and matches "show form only when NEW is clicked" behaviour.
+  toggleActorNewForm(false);
+  await loadActors();
+  openActorDetail(data.id);
+}
+
+// ── Drill-down view ────────────────────────────────────────────────
+function closeActorDetail(){
+  document.getElementById('actorDetailView').style.display = 'none';
+  document.getElementById('actorListView').style.display = '';
+  // Refresh in case evidence/references changed.
+  loadActors();
+}
+
+async function openActorDetail(profileId){
+  const {status, data} = await _actorJson('GET', `/api/actors/${encodeURIComponent(profileId)}`);
+  if(status !== 200){ alert(data.error || 'load failed'); return; }
+  document.getElementById('actorListView').style.display = 'none';
+  document.getElementById('actorDetailView').style.display = '';
+  // Header
+  document.getElementById('actorDetailHeader').textContent = data.name;
+  const sevWrap = document.getElementById('actorDetailSeverity');
+  sevWrap.innerHTML = ''; sevWrap.appendChild(_sevPill(data.severity));
+  document.getElementById('actorDetailId').textContent = data.id;
+  document.getElementById('actorDetailDelBtn').onclick = async () => {
+    if(!confirm(`Delete profile ${data.id} (and all evidence + references)?`)) return;
+    await _actorJson('DELETE', `/api/actors/${encodeURIComponent(data.id)}`);
+    closeActorDetail();
+  };
+
+  const body = document.getElementById('actorDetailBody');
+  body.innerHTML = '';
+
+  // Body grid: left column = metadata + notes, right column = stats
+  const grid = document.createElement('div');
+  grid.style.cssText = 'display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:14px;';
+
+  // ── Left column: notes + edit
+  const left = document.createElement('div');
+  left.className = 'rpanel';
+  left.style.cssText = 'margin:0;';
+  left.innerHTML = `
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>NOTES (markdown)</div>
+      <div style="display:flex;gap:6px;">
+        <button class="btn" id="actNotesToggleBtn" style="padding:3px 10px;font-size:9px;">EDIT</button>
+      </div>
+    </div>
+    <div class="pbody" style="padding:12px 14px;">
+      <div id="actNotesRendered" style="font-family:var(--mono);font-size:11px;"></div>
+      <div id="actNotesEditor" style="display:none;">
+        <textarea id="actNotesText" rows="8" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--cyan);font-family:var(--mono);font-size:11px;padding:8px;outline:none;resize:vertical;"></textarea>
+        <div style="margin-top:6px;display:flex;gap:6px;">
+          <button class="btn" style="padding:5px 14px;font-size:10px;" onclick="saveActorNotes('${data.id}')">SAVE</button>
+          <button class="btn" style="padding:5px 14px;font-size:10px;" onclick="cancelActorNotesEdit('${data.id}')">CANCEL</button>
+        </div>
+      </div>
+    </div>`;
+  grid.appendChild(left);
+
+  // ── Right column: metadata grid
+  const right = document.createElement('div');
+  right.className = 'rpanel';
+  right.style.cssText = 'margin:0;';
+  const metaRows = [
+    ['Aliases',     (data.aliases||[]).join(', ') || '—'],
+    ['Motivation',  data.motivation || '—'],
+    ['Origin',      data.origin_country || '—'],
+    ['First seen',  data.first_seen || '—'],
+    ['Last seen',   data.last_seen || '—'],
+    ['Targets',     (data.targets||[]).join(', ') || '—'],
+    ['Tags',        (data.tags||[]).map(t=>'#'+t).join(' ') || '—'],
+    ['Created',     (data.created_at||'').slice(0,10)],
+    ['Updated',     (data.updated_at||'').slice(0,10)],
+  ];
+  right.innerHTML = `
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>METADATA</div>
+      <button class="btn" onclick="openActorMetaEdit('${data.id}')" style="padding:3px 10px;font-size:9px;">EDIT</button>
+    </div>
+    <div class="pbody" id="actMetaBody" style="padding:12px 14px;font-family:var(--mono);font-size:11px;"></div>`;
+  grid.appendChild(right);
+  body.appendChild(grid);
+
+  // Render notes + metadata
+  document.getElementById('actNotesRendered').innerHTML =
+    renderMarkdown(data.notes) ||
+    '<div style="color:var(--text-dim);">No notes yet — click EDIT.</div>';
+  document.getElementById('actNotesText').value = data.notes || '';
+  document.getElementById('actNotesToggleBtn').onclick = () => editActorNotes(data.id);
+  const metaBody = document.getElementById('actMetaBody');
+  metaRows.forEach(([k,v]) => {
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:10px;padding:3px 0;';
+    const ks = safeText('span','', k);
+    ks.style.cssText = 'color:var(--text-muted);min-width:90px;';
+    row.appendChild(ks);
+    const vs = safeText('span','', v);
+    vs.style.cssText = 'color:var(--text);flex:1;word-break:break-word;';
+    row.appendChild(vs);
+    metaBody.appendChild(row);
+  });
+
+  // ── References panel
+  const refsPanel = document.createElement('div');
+  refsPanel.className = 'rpanel';
+  refsPanel.style.cssText = 'margin-bottom:14px;';
+  refsPanel.innerHTML = `
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>EXTERNAL REFERENCES</div><div class="pcount">${data.reference_count||0}</div></div>
+    <div class="pbody" style="padding:12px 14px;">
+      <div id="actRefsList"></div>
+      <div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border);display:grid;grid-template-columns:1fr 2fr 1fr auto;gap:8px;font-family:var(--mono);font-size:11px;">
+        <input id="refNewTitle_${data.id}"  placeholder="title (e.g., Microsoft writeup)" style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+        <input id="refNewUrl_${data.id}"    placeholder="https://..." style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+        <select id="refNewSource_${data.id}" style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+          <option value="">— source —</option>
+          <option value="vendor-report">vendor-report</option>
+          <option value="news">news</option>
+          <option value="blog">blog</option>
+          <option value="social">social</option>
+          <option value="mitre">mitre</option>
+          <option value="cve">cve</option>
+          <option value="misp">misp</option>
+          <option value="internal">internal</option>
+        </select>
+        <button class="btn" style="padding:5px 14px;font-size:10px;" onclick="addActorReference('${data.id}')">ADD REF</button>
+      </div>
+    </div>`;
+  body.appendChild(refsPanel);
+
+  const refsList = document.getElementById('actRefsList');
+  if(!(data.references||[]).length){
+    refsList.innerHTML = '<div style="color:var(--text-dim);font-family:var(--mono);font-size:11px;">No references attached. Add links to vendor reports, blogs, MITRE entries, etc.</div>';
+  } else {
+    (data.references||[]).forEach(r => {
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:6px 0;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:baseline;';
+      const src = safeText('span','', '[' + (r.source||'misc') + ']');
+      src.style.cssText = 'color:var(--text-muted);font-size:9px;min-width:80px;';
+      row.appendChild(src);
+      const a = document.createElement('a');
+      a.href = r.url; a.target='_blank'; a.rel='noopener';
+      a.textContent = r.title;
+      a.style.cssText = 'color:var(--cyan);text-decoration:none;border-bottom:1px dotted var(--cyan-dim);';
+      row.appendChild(a);
+      const date = safeText('span','', (r.added_at||'').slice(0,10));
+      date.style.cssText = 'color:var(--text-muted);font-size:9px;';
+      row.appendChild(date);
+      const del = document.createElement('button');
+      del.textContent='✕'; del.title='remove reference';
+      del.style.cssText = 'background:transparent;border:1px solid var(--border);color:var(--text-muted);font-family:var(--mono);font-size:10px;padding:0 6px;cursor:pointer;';
+      del.onclick = async (ev) => {
+        ev.stopPropagation();
+        if(!confirm('Remove reference?')) return;
+        await _actorJson('DELETE', `/api/actors/references/${r.id}`);
+        openActorDetail(data.id);
+      };
+      row.appendChild(del);
+      body.appendChild(row);
+      refsList.appendChild(row);
+    });
+  }
+
+  // ── Manual attribution form
+  const attr = document.createElement('div');
+  attr.className = 'rpanel';
+  attr.style.cssText = 'margin-bottom:14px;';
+  attr.innerHTML = `
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>ATTRIBUTE NEW EVIDENCE</div></div>
+    <div class="pbody" style="padding:12px 14px;font-family:var(--mono);font-size:11px;">
+      <div style="display:grid;grid-template-columns:2fr 1fr 1fr 1fr;gap:8px;">
+        <input id="aev_seed_${data.id}"  placeholder="source seed (domain / IP / hash)" style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+        <input id="aev_src_${data.id}"   placeholder="source label" value="manual" style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+        <select id="aev_cat_${data.id}"  style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+          <option value="misc">misc</option>
+          <option value="ioc">ioc</option>
+          <option value="ttp">ttp (MITRE)</option>
+          <option value="infra">infra</option>
+          <option value="tooling">tooling/malware</option>
+          <option value="human">human/persona</option>
+          <option value="news">news/report</option>
+        </select>
+        <select id="aev_conf_${data.id}" style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;">
+          <option value="">— confidence —</option>
+          <option value="high">high</option>
+          <option value="medium" selected>medium</option>
+          <option value="low">low</option>
+        </select>
+      </div>
+      <input id="aev_tags_${data.id}" placeholder="evidence tags (comma-separated)" style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:5px 8px;outline:none;width:100%;margin-top:6px;">
+      <textarea id="aev_body_${data.id}" rows="3" placeholder='{"finding":"...", "details":...}' style="background:var(--bg);border:1px solid var(--border);color:var(--cyan);padding:6px 8px;width:100%;margin-top:6px;outline:none;resize:vertical;"></textarea>
+      <div style="margin-top:6px;display:flex;gap:8px;align-items:center;">
+        <button class="btn" style="padding:5px 14px;font-size:10px;" onclick="submitAttribution('${data.id}')">ATTRIBUTE</button>
+        <label style="font-size:10px;color:var(--text-muted);"><input type="checkbox" id="aev_notify_${data.id}"> notify Slack</label>
+        <span style="margin-left:auto;color:var(--text-muted);font-size:9px;">Evidence must be valid JSON. Use category to bucket by IOC / TTP / infra / etc.</span>
+      </div>
+    </div>`;
+  body.appendChild(attr);
+
+  // ── Evidence timeline
+  const tlPanel = document.createElement('div');
+  tlPanel.className = 'rpanel';
+  tlPanel.innerHTML = `
+    <div class="phdr"><div class="ptitle"><div class="pdot"></div>EVIDENCE TIMELINE</div><div class="pcount">${data.evidence_count}</div></div>
+    <div class="pbody" id="actEvTimeline" style="padding:0;"></div>`;
+  body.appendChild(tlPanel);
+
+  const tl = document.getElementById('actEvTimeline');
+  if(!(data.evidence||[]).length){
+    tl.innerHTML = '<div style="padding:14px;color:var(--text-dim);font-family:var(--mono);font-size:11px;">No evidence attributed yet. Use the form above, or accept a HUNTS pending match bound to this profile.</div>';
+  } else {
+    (data.evidence||[]).forEach(e => {
+      const ev = document.createElement('div');
+      ev.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;';
+      const head = document.createElement('div');
+      head.style.cssText = 'display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;';
+      head.appendChild(_catPill(e.category));
+      const conf = _confPill(e.confidence); if(conf) head.appendChild(conf);
+      const ts = safeText('span','', e.seen_at);
+      ts.style.cssText = 'color:var(--text-muted);font-size:9px;';
+      head.appendChild(ts);
+      const src = safeText('span','', '[' + e.source + ']');
+      src.style.cssText = 'color:var(--amber);font-size:10px;';
+      head.appendChild(src);
+      if(e.source_seed){
+        const seed = safeText('span','', e.source_seed);
+        seed.style.cssText = 'color:var(--cyan);';
+        head.appendChild(seed);
+      }
+      (e.tags||[]).forEach(t => {
+        const tag = safeText('span','', '#'+t);
+        tag.style.cssText = 'color:var(--purple);font-size:10px;';
+        head.appendChild(tag);
+      });
+      const detach = document.createElement('button');
+      detach.textContent='✕'; detach.title='detach evidence';
+      detach.style.cssText = 'margin-left:auto;background:transparent;border:1px solid var(--border);color:var(--text-muted);font-family:var(--mono);font-size:10px;padding:0 6px;cursor:pointer;';
+      detach.onclick = async () => {
+        if(!confirm('Detach this evidence?')) return;
+        await _actorJson('DELETE', `/api/actors/evidence/${e.id}`);
+        openActorDetail(data.id);
+      };
+      head.appendChild(detach);
+      ev.appendChild(head);
+      const body2 = document.createElement('pre');
+      body2.style.cssText = 'color:var(--text);font-family:var(--mono);font-size:10px;margin:6px 0 0;white-space:pre-wrap;word-break:break-word;line-height:1.4;background:var(--bg2);padding:6px 8px;';
+      body2.textContent = JSON.stringify(e.evidence, null, 2);
+      ev.appendChild(body2);
+      tl.appendChild(ev);
+    });
+  }
+}
+
+function editActorNotes(profileId){
+  document.getElementById('actNotesRendered').style.display = 'none';
+  document.getElementById('actNotesEditor').style.display   = '';
+  document.getElementById('actNotesToggleBtn').textContent  = 'CANCEL';
+  document.getElementById('actNotesToggleBtn').onclick      = () => cancelActorNotesEdit(profileId);
+}
+function cancelActorNotesEdit(profileId){
+  openActorDetail(profileId);
+}
+async function saveActorNotes(profileId){
+  const notes = document.getElementById('actNotesText').value;
+  const {status, data} = await _actorJson('PATCH', `/api/actors/${encodeURIComponent(profileId)}`, {notes});
+  if(status !== 200){ alert(data.error || 'save failed'); return; }
+  openActorDetail(profileId);
+}
+
+// Edit metadata in a simple prompt-driven flow. Keeps the view density
+// low while still letting the analyst fix anything without a separate
+// "edit profile" tab.
+async function openActorMetaEdit(profileId){
+  const {status, data} = await _actorJson('GET', `/api/actors/${encodeURIComponent(profileId)}`);
+  if(status !== 200){ alert(data.error || 'load failed'); return; }
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:30px;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--bg);border:1px solid var(--cyan);padding:18px;max-width:720px;width:100%;font-family:var(--mono);font-size:11px;color:var(--text);';
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+      <strong style="color:var(--cyan);letter-spacing:2px;">EDIT METADATA — ${data.name}</strong>
+      <button class="btn" style="padding:4px 10px;font-size:9px;" id="metaEditClose">CLOSE</button>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+      <div><div class="ilabel">// NAME</div><input id="me_name" value="${data.name.replace(/"/g,'&quot;')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+      <div><div class="ilabel">// SEVERITY</div>
+        <select id="me_severity" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;">
+          <option value="" ${data.severity===''?'selected':''}>—</option>
+          <option value="critical" ${data.severity==='critical'?'selected':''}>critical</option>
+          <option value="high" ${data.severity==='high'?'selected':''}>high</option>
+          <option value="medium" ${data.severity==='medium'?'selected':''}>medium</option>
+          <option value="low" ${data.severity==='low'?'selected':''}>low</option>
+        </select>
+      </div>
+      <div><div class="ilabel">// ALIASES</div><input id="me_aliases" value="${(data.aliases||[]).join(', ').replace(/"/g,'&quot;')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+      <div><div class="ilabel">// TAGS</div><input id="me_tags" value="${(data.tags||[]).join(', ').replace(/"/g,'&quot;')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+      <div><div class="ilabel">// MOTIVATION</div>
+        <select id="me_motivation" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;">
+          <option value="" ${(data.motivation||'')===''?'selected':''}>—</option>
+          <option value="state-sponsored" ${data.motivation==='state-sponsored'?'selected':''}>state-sponsored</option>
+          <option value="financial" ${data.motivation==='financial'?'selected':''}>financial</option>
+          <option value="hacktivism" ${data.motivation==='hacktivism'?'selected':''}>hacktivism</option>
+          <option value="ideological" ${data.motivation==='ideological'?'selected':''}>ideological</option>
+          <option value="insider" ${data.motivation==='insider'?'selected':''}>insider</option>
+          <option value="unknown" ${data.motivation==='unknown'?'selected':''}>unknown</option>
+        </select>
+      </div>
+      <div><div class="ilabel">// ORIGIN</div><input id="me_origin" value="${(data.origin_country||'').replace(/"/g,'&quot;')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+      <div><div class="ilabel">// FIRST SEEN</div><input id="me_first" value="${(data.first_seen||'')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+      <div><div class="ilabel">// LAST SEEN</div><input id="me_last" value="${(data.last_seen||'')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+    </div>
+    <div style="margin-top:10px;"><div class="ilabel">// TARGETS</div><input id="me_targets" value="${(data.targets||[]).join(', ').replace(/"/g,'&quot;')}" style="width:100%;background:var(--bg2);border:1px solid var(--border);color:var(--cyan);padding:6px;outline:none;"></div>
+    <div style="margin-top:14px;display:flex;gap:8px;">
+      <button class="btn" style="padding:6px 16px;font-size:10px;" id="metaEditSave">SAVE</button>
+    </div>`;
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+  box.querySelector('#metaEditClose').onclick = () => overlay.remove();
+  overlay.addEventListener('click', e => { if(e.target===overlay) overlay.remove(); });
+  box.querySelector('#metaEditSave').onclick = async () => {
+    const payload = {
+      name:           box.querySelector('#me_name').value.trim(),
+      severity:       box.querySelector('#me_severity').value,
+      aliases:        box.querySelector('#me_aliases').value,
+      tags:           box.querySelector('#me_tags').value,
+      motivation:     box.querySelector('#me_motivation').value,
+      origin_country: box.querySelector('#me_origin').value.trim(),
+      first_seen:     box.querySelector('#me_first').value.trim(),
+      last_seen:      box.querySelector('#me_last').value.trim(),
+      targets:        box.querySelector('#me_targets').value,
+    };
+    const {status, data: rd} = await _actorJson('PATCH', `/api/actors/${encodeURIComponent(profileId)}`, payload);
+    if(status !== 200){ alert(rd.error || 'save failed'); return; }
+    overlay.remove();
+    openActorDetail(profileId);
+  };
+}
+
+async function addActorReference(profileId){
+  const t = document.getElementById('refNewTitle_'+profileId);
+  const u = document.getElementById('refNewUrl_'+profileId);
+  const s = document.getElementById('refNewSource_'+profileId);
+  const title = (t.value||'').trim(), url = (u.value||'').trim();
+  if(!title || !url){ alert('Title and URL are required.'); return; }
+  const {status, data} = await _actorJson('POST', `/api/actors/${encodeURIComponent(profileId)}/references`,
+    {title, url, source: s.value});
+  if(status !== 200){ alert(data.error || 'add failed'); return; }
+  t.value=''; u.value=''; s.value='';
+  openActorDetail(profileId);
+}
+
+async function submitAttribution(profileId){
+  const seed = document.getElementById('aev_seed_'+profileId).value.trim();
+  const src  = document.getElementById('aev_src_'+profileId).value.trim() || 'manual';
+  const cat  = document.getElementById('aev_cat_'+profileId).value || 'misc';
+  const conf = document.getElementById('aev_conf_'+profileId).value || '';
+  const tagsStr = document.getElementById('aev_tags_'+profileId).value;
+  const tags = tagsStr ? tagsStr.split(',').map(s=>s.trim()).filter(Boolean) : [];
+  const raw  = document.getElementById('aev_body_'+profileId).value.trim();
+  const notify = document.getElementById('aev_notify_'+profileId).checked;
+  let evidence;
+  try { evidence = raw ? JSON.parse(raw) : {finding: 'manual note'}; }
+  catch(e){ alert('Evidence must be valid JSON'); return; }
+  const {status, data} = await _actorJson('POST', `/api/actors/${encodeURIComponent(profileId)}/attribute`,
+    {evidence, source: src, source_seed: seed, category: cat, confidence: conf, tags, notify});
+  if(status !== 200){ alert(data.error || 'attribute failed'); return; }
+  ['aev_seed_','aev_body_','aev_tags_'].forEach(p => {
+    const e = document.getElementById(p+profileId); if(e) e.value='';
+  });
+  openActorDetail(profileId);
+}
+
+function populateProfileSelect(profiles){
+  const sel = document.getElementById('huntNewProfileId');
+  if(!sel) return;
+  const current = sel.value;
+  sel.innerHTML = '<option value="">— none —</option>';
+  profiles.forEach(p => {
+    const opt = document.createElement('option');
+    opt.value = p.id;
+    opt.textContent = p.name + ' (' + p.id + ')';
+    sel.appendChild(opt);
+  });
+  sel.value = current;
+}
+
+// ════════════════════════════════════════════════════════════
+// HUNTS — rule manager + pending queue + monitor status
+// ════════════════════════════════════════════════════════════
+const _HUNT_EXAMPLE = {
+  "and": [
+    {"field": "host", "op": "regex", "value": "^(secure|verify|login)\\w*example\\."},
+    {"field": "creation", "op": "after", "value": "2026-01-01"},
+    {"or": [
+      {"field": "registrar", "op": "icontains", "value": "ExampleRegistrar"},
+      {"field": "issuer", "op": "icontains", "value": "Let's Encrypt"}
+    ]}
+  ]
+};
+
+function huntLoadExample(){
+  document.getElementById('huntNewCondition').value = JSON.stringify(_HUNT_EXAMPLE, null, 2);
+  if(!document.getElementById('huntNewName').value)
+    document.getElementById('huntNewName').value = 'example lure';
+}
+
+async function loadHunts(){
+  // Load profiles first so the select is populated.
+  if(!_actorCache.length) await loadActors();
+  // Pull rules + monitor + pending queue in parallel.
+  const [rules, queue] = await Promise.all([
+    _actorJson('GET', '/api/hunts'),
+    _actorJson('GET', '/api/hunts/matches/all?status=pending'),
+  ]);
+  if(rules.status === 200){
+    renderMonitorStatus(rules.data.monitor || {});
+    renderHuntList(rules.data.rules || []);
+  }
+  if(queue.status === 200){
+    renderPendingQueue(queue.data.matches || []);
+  }
+}
+
+function renderMonitorStatus(m){
+  const grid = document.getElementById('monitorStatusBody');
+  if(!grid) return;
+  const rows = [
+    ['workers', m.workers_started ? 'running' : 'stopped',         m.workers_started ? 'var(--green)' : 'var(--red)'],
+    ['primary source', m.primary_source || '—',                    m.primary_source==='certstream'?'var(--green)':(m.primary_source==='crtsh'?'var(--amber)':'var(--text-muted)')],
+    ['certstream connected', m.certstream_connected ? 'yes' : 'no', m.certstream_connected ? 'var(--green)' : 'var(--red)'],
+    ['certstream messages',  String(m.certstream_msg_count || 0),  'var(--text)'],
+    ['certstream last msg',  m.certstream_last_msg_at || '—',      'var(--text-muted)'],
+    ['crt.sh runs',          String(m.crtsh_run_count || 0),       'var(--text)'],
+    ['crt.sh last run',      m.crtsh_last_run_at || '—',           'var(--text-muted)'],
+    ['crt.sh last matches',  String(m.crtsh_last_match_count || 0),'var(--text)'],
+    ['GTI livehunt runs',    String(m.gti_run_count || 0),         'var(--text)'],
+    ['GTI last matches',     String(m.gti_last_match_count || 0),  'var(--text)'],
+  ];
+  grid.innerHTML = '';
+  rows.forEach(([k, v, color]) => {
+    const ks = safeText('span','', k);
+    ks.style.cssText = 'color:var(--text-muted);';
+    const vs = safeText('span','', v);
+    vs.style.cssText = `color:${color};`;
+    grid.appendChild(ks);
+    grid.appendChild(vs);
+  });
+}
+
+function renderHuntList(rules){
+  const body = document.getElementById('huntListBody');
+  const cnt  = document.getElementById('huntListCount');
+  body.innerHTML = '';
+  cnt.textContent = String(rules.length);
+  if(!rules.length){
+    body.innerHTML = `<div style="padding:14px;color:var(--text-dim);font-family:var(--mono);font-size:11px;">No rules yet — create one above. Click "LOAD EXAMPLE" for a starter composite rule.</div>`;
+    return;
+  }
+  rules.forEach(r => {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:grid;grid-template-columns:auto 1fr auto auto auto;gap:10px;align-items:center;';
+    const dot = safeText('span','●');
+    dot.style.cssText = `color:${r.enabled ? 'var(--green)' : 'var(--text-muted)'};font-size:14px;`;
+    head.appendChild(dot);
+    const name = document.createElement('div');
+    const n = safeText('div','', r.name);
+    n.style.cssText = 'color:var(--cyan);font-weight:600;';
+    name.appendChild(n);
+    const meta = safeText('div','', `id=${r.id} · fires=${r.fire_count} · profile=${r.profile_id||'—'}${r.last_fired_at?(' · last '+r.last_fired_at):''}`);
+    meta.style.cssText = 'color:var(--text-muted);font-size:9px;margin-top:2px;';
+    name.appendChild(meta);
+    if(r.description){
+      const d = safeText('div','', r.description);
+      d.style.cssText = 'color:var(--text-dim);font-size:10px;margin-top:2px;';
+      name.appendChild(d);
+    }
+    head.appendChild(name);
+    const toggle = document.createElement('button');
+    toggle.className = 'btn';
+    toggle.style.cssText = 'padding:4px 10px;font-size:9px;';
+    toggle.textContent = r.enabled ? 'DISABLE' : 'ENABLE';
+    toggle.onclick = async () => {
+      await _actorJson('PATCH', `/api/hunts/${r.id}`, {enabled: !r.enabled});
+      loadHunts();
+    };
+    head.appendChild(toggle);
+    const yaml = document.createElement('button');
+    yaml.className = 'btn';
+    yaml.style.cssText = 'padding:4px 10px;font-size:9px;';
+    yaml.textContent = 'GTI YAML';
+    yaml.onclick = () => showGtiYaml(r.id);
+    head.appendChild(yaml);
+    const del = document.createElement('button');
+    del.className = 'btn';
+    del.style.cssText = 'padding:4px 10px;font-size:9px;border-color:var(--red);color:var(--red);';
+    del.textContent = '✕';
+    del.title = 'delete rule';
+    del.onclick = async () => {
+      if(!confirm(`Delete rule "${r.name}" and all its matches?`)) return;
+      await _actorJson('DELETE', `/api/hunts/${r.id}`);
+      loadHunts();
+    };
+    head.appendChild(del);
+    row.appendChild(head);
+    const pre = document.createElement('pre');
+    pre.style.cssText = 'margin:8px 0 0;background:var(--bg2);padding:6px 8px;color:var(--text);font-family:var(--mono);font-size:10px;white-space:pre-wrap;word-break:break-word;line-height:1.4;max-height:160px;overflow:auto;';
+    pre.textContent = JSON.stringify(r.rule.condition || r.rule, null, 2);
+    row.appendChild(pre);
+    body.appendChild(row);
+  });
+}
+
+function renderPendingQueue(matches){
+  const body = document.getElementById('huntPendingBody');
+  const cnt  = document.getElementById('huntPendingCount');
+  body.innerHTML = '';
+  cnt.textContent = String(matches.length);
+  if(!matches.length){
+    body.innerHTML = `<div style="padding:14px;color:var(--text-dim);font-family:var(--mono);font-size:11px;">No pending matches.</div>`;
+    return;
+  }
+  matches.forEach(m => {
+    const row = document.createElement('div');
+    row.style.cssText = 'padding:10px 14px;border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;';
+    const head = document.createElement('div');
+    head.style.cssText = 'display:grid;grid-template-columns:1fr auto auto auto;gap:10px;align-items:center;';
+    const main = document.createElement('div');
+    const val = safeText('div','', m.matched_value || '?');
+    val.style.cssText = 'color:var(--cyan);font-weight:600;';
+    main.appendChild(val);
+    const meta = safeText('div','', `rule=${m.rule_name||'?'} · src=${m.source} · seen=${m.seen_at} · profile=${m.profile_id||'—'}`);
+    meta.style.cssText = 'color:var(--text-muted);font-size:9px;margin-top:2px;';
+    main.appendChild(meta);
+    const preds = ((m.evidence||{}).predicates || []);
+    if(preds.length){
+      const p = safeText('div','', preds.map(x => `${x.field} ${x.op} → ${String(x.matched_against||'').slice(0,80)}`).join('   ·   '));
+      p.style.cssText = 'color:var(--text-dim);font-size:10px;margin-top:2px;';
+      main.appendChild(p);
+    }
+    head.appendChild(main);
+    const accept = document.createElement('button');
+    accept.className = 'btn';
+    accept.style.cssText = 'padding:4px 10px;font-size:9px;border-color:var(--green);color:var(--green);';
+    accept.textContent = 'ACCEPT → PROFILE';
+    accept.onclick = async () => {
+      const r = await _actorJson('POST', `/api/hunts/matches/${m.id}/accept`, {});
+      loadHunts();
+      if(r.status===200 && r.data.attributed_to) loadActors();
+    };
+    head.appendChild(accept);
+    const reject = document.createElement('button');
+    reject.className = 'btn';
+    reject.style.cssText = 'padding:4px 10px;font-size:9px;border-color:var(--red);color:var(--red);';
+    reject.textContent = 'REJECT';
+    reject.onclick = async () => {
+      await _actorJson('POST', `/api/hunts/matches/${m.id}/reject`);
+      loadHunts();
+    };
+    head.appendChild(reject);
+    const vt = document.createElement('a');
+    vt.href = `https://www.virustotal.com/gui/domain/${encodeURIComponent(m.matched_value)}`;
+    vt.target = '_blank';
+    vt.rel = 'noopener';
+    vt.textContent = 'VT ↗';
+    vt.style.cssText = 'color:var(--purple);text-decoration:none;font-size:10px;padding:0 4px;';
+    head.appendChild(vt);
+    row.appendChild(head);
+    body.appendChild(row);
+  });
+}
+
+async function createHunt(){
+  const name = document.getElementById('huntNewName').value.trim();
+  const desc = document.getElementById('huntNewDesc').value.trim();
+  const profile_id = document.getElementById('huntNewProfileId').value || null;
+  const raw  = document.getElementById('huntNewCondition').value.trim();
+  if(!name){ alert('Rule name is required'); return; }
+  let condition;
+  try { condition = JSON.parse(raw); }
+  catch(e){ alert('Condition must be valid JSON: ' + e.message); return; }
+  const {status, data} = await _actorJson('POST', '/api/hunts',
+    {name, description: desc, profile_id, condition, enabled: true});
+  if(status !== 200){ alert(data.error || 'create failed'); return; }
+  document.getElementById('huntNewName').value = '';
+  document.getElementById('huntNewDesc').value = '';
+  document.getElementById('huntNewCondition').value = '';
+  loadHunts();
+}
+
+async function showGtiYaml(ruleId){
+  const {status, data} = await _actorJson('GET', `/api/hunts/${ruleId}/livehunt-yaml`);
+  if(status !== 200){ alert(data.error || 'failed'); return; }
+  // Simple modal
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:9999;display:flex;align-items:center;justify-content:center;padding:30px;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:var(--bg);border:1px solid var(--cyan);padding:18px;max-width:900px;width:100%;max-height:80vh;overflow:auto;font-family:var(--mono);font-size:11px;';
+  box.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+      <strong style="color:var(--cyan);letter-spacing:2px;">GTI LIVEHUNT YAML — paste into the GTI console</strong>
+      <button class="btn" style="padding:4px 10px;font-size:9px;">CLOSE</button>
+    </div>
+    <pre style="background:var(--bg2);padding:12px;color:var(--text);white-space:pre;overflow:auto;border-left:2px solid var(--cyan-dim);"></pre>
+    <div style="margin-top:8px;color:var(--text-muted);font-size:9px;line-height:1.5;">
+      Untranslatable leaves are emitted as <code>// comments</code> — review and convert by hand for GTI semantics that don't have a Crucible equivalent.
+    </div>`;
+  box.querySelector('pre').textContent = data.yaml;
+  box.querySelector('button').onclick = () => overlay.remove();
+  overlay.appendChild(box);
+  overlay.addEventListener('click', e => { if(e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+async function testSlackAlert(){
+  const {status, data} = await _actorJson('POST', '/api/monitor/test-alert', {});
+  if(status === 200 && data.status === 'sent'){
+    alert('Slack test message sent — check your channel.');
+  } else {
+    alert(data.message || data.status || 'failed');
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// ACTIVE SCAN — scantower.io
+// ════════════════════════════════════════════════════════════
+function _actLog(msg, type='info', stage=''){ logTo('activeLog', msg, type, stage || 'SCAN'); }
+function _actSetProg(t){ const e=document.getElementById('activeScanProg'); if(e) e.textContent=t; }
+
+function updateActiveScanButton(){
+  const ok = document.getElementById('activeAuthorized').checked;
+  const btn = document.getElementById('activeScanBtn');
+  btn.disabled = !ok;
+  btn.style.opacity = ok ? '' : '.5';
+}
+
+async function startActiveScan(){
+  const url  = document.getElementById('activeUrl').value.trim();
+  if(!url){ alert('URL is required'); return; }
+  if(!document.getElementById('activeAuthorized').checked){
+    alert('Authorization confirmation is required'); return;
+  }
+  const body = {
+    url,
+    scan_type:        document.getElementById('activeScanType').value,
+    port_scan:        document.getElementById('activePortScan').checked,
+    browser_scan:     document.getElementById('activeBrowserScan').checked,
+    misconfiguration: document.getElementById('activeMisconfig').checked,
+    authorized:       true,
+  };
+  const btn = document.getElementById('activeScanBtn');
+  btn.disabled = true; btn.style.opacity = '.5';
+  _actSetProg('TRIGGERING');
+  _actLog(`triggering ${body.scan_type} scan on ${url}`, 'live', 'SCAN');
+
+  let trig;
+  try {
+    const r = await fetch('/api/scantower/scan', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    trig = await r.json();
+    if(!r.ok || trig.error){
+      _actLog(trig.error || `HTTP ${r.status}`, 'err'); _actSetProg('FAILED');
+      updateActiveScanButton(); return;
+    }
+  } catch(e){
+    _actLog('trigger failed: ' + e.message, 'err'); _actSetProg('FAILED');
+    updateActiveScanButton(); return;
+  }
+  const scanId = trig.scan_id || (trig.raw && trig.raw.data && trig.raw.data.id);
+  if(!scanId){
+    _actLog('No scan_id returned by scantower — raw: ' + JSON.stringify(trig.raw).slice(0,400), 'warn');
+    _actSetProg('UNKNOWN'); updateActiveScanButton(); return;
+  }
+  _actLog(`scan_id=${scanId} — polling…`, 'ok');
+  _actSetProg('POLLING');
+
+  let poll;
+  try {
+    const r = await fetch(`/api/scantower/scan/${encodeURIComponent(scanId)}?wait=true&timeout=180`);
+    poll = await r.json();
+  } catch(e){
+    _actLog('poll failed: ' + e.message, 'err'); _actSetProg('FAILED');
+    updateActiveScanButton(); return;
+  }
+  if(poll && poll.error){
+    _actLog(poll.error, 'err'); _actSetProg('FAILED');
+    updateActiveScanButton(); return;
+  }
+  const status = (poll && (poll.status || '')).toString().toLowerCase();
+  _actLog(`scan status: ${status || '(unknown)'}`, status==='completed'?'ok':'warn');
+  if(poll && poll._timeout){ _actLog('poll timed out — check RECENT SCANS later', 'warn'); }
+
+  _actSetProg('FETCHING REPORT');
+  // Pull the structured report
+  const seedHost = (() => { try { return new URL(url).hostname; } catch(_){ return ''; } })();
+  let rep;
+  try {
+    const r = await fetch(`/api/scantower/report/${encodeURIComponent(scanId)}?seed=${encodeURIComponent(seedHost)}`);
+    rep = await r.json();
+  } catch(e){
+    _actLog('report fetch failed: ' + e.message, 'err'); _actSetProg('FAILED');
+    updateActiveScanButton(); return;
+  }
+  if(rep.error){ _actLog(rep.error, 'err'); _actSetProg('FAILED'); updateActiveScanButton(); return; }
+  renderActiveReport(scanId, url, rep.intel || {});
+  _actSetProg('DONE'); _actLog('report rendered', 'ok');
+  loadActiveHistory();
+  updateActiveScanButton();
+}
+
+function renderActiveReport(scanId, url, intel){
+  const panel = document.getElementById('activeReportPanel');
+  panel.style.display = '';
+  document.getElementById('activeReportTitle').textContent = url + '   ·   ' + scanId;
+  const summary = intel.summary || {};
+  document.getElementById('activeReportCount').textContent =
+    `${intel.vuln_count||0} vuln · ${intel.hostname_count||0} host · ${intel.ip_count||0} ip`;
+  const body = document.getElementById('activeReportBody');
+  body.innerHTML = '';
+
+  // Header summary
+  const head = document.createElement('div');
+  head.style.cssText = 'display:grid;grid-template-columns:repeat(6, auto);gap:14px;margin-bottom:14px;font-family:var(--mono);font-size:11px;';
+  const stats = [
+    ['SCORE',    intel.security_score==null ? '—' : String(intel.security_score), 'var(--cyan)'],
+    ['TOTAL',    summary.total ?? 0, 'var(--text)'],
+    ['CRITICAL', summary.critical ?? 0, 'var(--red)'],
+    ['HIGH',     summary.high ?? 0, 'var(--amber)'],
+    ['MEDIUM',   summary.medium ?? 0, 'var(--cyan)'],
+    ['LOW',      summary.low ?? 0, 'var(--text-dim)'],
+  ];
+  stats.forEach(([k,v,c]) => {
+    const cell = document.createElement('div');
+    cell.style.cssText = 'text-align:left;';
+    const kt = safeText('div','',k); kt.style.cssText='color:var(--text-muted);font-size:9px;letter-spacing:1px;';
+    const vt = safeText('div','',String(v)); vt.style.cssText=`color:${c};font-size:18px;font-weight:600;`;
+    cell.appendChild(kt); cell.appendChild(vt);
+    head.appendChild(cell);
+  });
+  body.appendChild(head);
+
+  // Vulnerabilities
+  const vulns = intel.vulnerabilities || [];
+  if(vulns.length){
+    const hdr = safeText('div','','VULNERABILITIES ('+vulns.length+')');
+    hdr.style.cssText = 'color:var(--red);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-bottom:6px;';
+    body.appendChild(hdr);
+    const sevColor = {critical:'var(--red)',high:'var(--amber)',medium:'var(--cyan)',low:'var(--text-dim)','':'var(--text-muted)'};
+    vulns.forEach(v => {
+      const row = document.createElement('div');
+      const c = sevColor[v.severity] || 'var(--text-muted)';
+      row.style.cssText = `padding:6px 10px;margin:3px 0;background:var(--bg2);border-left:2px solid ${c};font-family:var(--mono);font-size:11px;`;
+      const h = document.createElement('div');
+      h.style.cssText = 'display:flex;gap:8px;align-items:baseline;';
+      const sev = safeText('span','',(v.severity||'?').toUpperCase());
+      sev.style.cssText = `color:${c};font-size:9px;letter-spacing:1px;border:1px solid ${c};padding:0 6px;`;
+      h.appendChild(sev);
+      const title = safeText('span','',v.title||v.id||'?');
+      title.style.cssText = 'color:var(--text);';
+      h.appendChild(title);
+      row.appendChild(h);
+      if(v.description){
+        const d = safeText('div','',v.description);
+        d.style.cssText = 'color:var(--text-dim);font-size:10px;margin-top:3px;line-height:1.5;';
+        row.appendChild(d);
+      }
+      if(v.evidence){
+        const e = safeText('div','','evidence: '+v.evidence);
+        e.style.cssText = 'color:var(--cyan);font-size:10px;margin-top:3px;';
+        row.appendChild(e);
+      }
+      if(v.remediation){
+        const rm = safeText('div','','fix: '+v.remediation);
+        rm.style.cssText = 'color:var(--green);font-size:10px;margin-top:3px;';
+        row.appendChild(rm);
+      }
+      body.appendChild(row);
+    });
+  } else {
+    const h = safeText('div','','VULNERABILITIES (none)');
+    h.style.cssText = 'color:var(--green);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin-bottom:10px;';
+    body.appendChild(h);
+  }
+
+  // Hostnames + IPs extracted from anywhere in the payload
+  const hosts = intel.hostnames || [];
+  if(hosts.length){
+    const hdr = safeText('div','','HOSTNAMES IN REPORT ('+hosts.length+')');
+    hdr.style.cssText = 'color:var(--purple);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin:14px 0 4px;';
+    body.appendChild(hdr);
+    hosts.forEach(h => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:10px;padding:2px 8px;background:var(--bg2);margin:1px 0;font-family:var(--mono);font-size:11px;';
+      const flag = safeText('span','', h.related_to_seed ? '★' : '·');
+      flag.style.cssText = `color:${h.related_to_seed?'var(--amber)':'var(--text-muted)'};width:10px;`;
+      row.appendChild(flag);
+      const name = safeText('span','', h.host);
+      name.style.cssText = 'color:var(--cyan);flex:1;';
+      row.appendChild(name);
+      body.appendChild(row);
+    });
+  }
+  const ips = intel.ips || [];
+  if(ips.length){
+    const hdr = safeText('div','','PUBLIC IPs IN REPORT ('+ips.length+')');
+    hdr.style.cssText = 'color:var(--green);font-family:var(--mono);font-size:10px;letter-spacing:2px;margin:14px 0 4px;';
+    body.appendChild(hdr);
+    ips.forEach(ip => {
+      const row = safeText('div','', ip);
+      row.style.cssText = 'padding:2px 8px;background:var(--bg2);margin:1px 0;color:var(--green);font-family:var(--mono);font-size:11px;';
+      body.appendChild(row);
+    });
+  }
+
+  // Raw keys present (debug aid since scantower's report schema is sparse)
+  if((intel.raw_keys||[]).length){
+    const dbg = safeText('div','','REPORT TOP-LEVEL KEYS: '+intel.raw_keys.join(', '));
+    dbg.style.cssText = 'color:var(--text-muted);font-family:var(--mono);font-size:9px;margin-top:14px;';
+    body.appendChild(dbg);
+  }
+}
+
+async function loadActiveHistory(){
+  try {
+    const r = await fetch('/api/scantower/scans?limit=20');
+    const data = await r.json();
+    const scans = (data && data.scans) || [];
+    const body = document.getElementById('activeHistoryBody');
+    document.getElementById('activeHistoryCount').textContent = String(scans.length);
+    body.innerHTML = '';
+    if(!scans.length){
+      body.innerHTML = `<div style="padding:12px;color:var(--text-dim);font-family:var(--mono);font-size:11px;">${(data && data.error) || 'No scans yet (or scantower API key not configured).'}</div>`;
+      return;
+    }
+    scans.forEach(s => {
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:8px 12px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:auto 1fr auto auto;gap:10px;align-items:center;font-family:var(--mono);font-size:11px;cursor:pointer;';
+      const st = safeText('span','', (s.status||'?').toString());
+      const c = (s.status==='completed') ? 'var(--green)' : ((s.status||'').toLowerCase()==='failed'?'var(--red)':'var(--amber)');
+      st.style.cssText = `color:${c};font-size:9px;letter-spacing:1px;border:1px solid ${c};padding:0 6px;`;
+      row.appendChild(st);
+      const url = safeText('div','', s.url || s.target || '');
+      url.style.cssText = 'color:var(--cyan);';
+      row.appendChild(url);
+      const date = safeText('span','', (s.createdAt || s.created_at || '').slice(0,19).replace('T',' '));
+      date.style.cssText = 'color:var(--text-muted);font-size:9px;';
+      row.appendChild(date);
+      const view = document.createElement('button');
+      view.className='btn'; view.style.cssText='padding:4px 10px;font-size:9px;';
+      view.textContent='VIEW';
+      view.onclick = async (ev) => {
+        ev.stopPropagation();
+        const sid = s.id || s.scanId;
+        if(!sid) return;
+        const seedHost = (() => { try { return new URL(s.url || '').hostname; } catch(_){ return ''; } })();
+        const rr = await fetch(`/api/scantower/report/${encodeURIComponent(sid)}?seed=${encodeURIComponent(seedHost)}`);
+        const rd = await rr.json();
+        if(rd.error){ alert(rd.error); return; }
+        renderActiveReport(sid, s.url||'', rd.intel||{});
+      };
+      row.appendChild(view);
+      body.appendChild(row);
+    });
+  } catch(e){
+    document.getElementById('activeHistoryBody').innerHTML =
+      `<div style="padding:12px;color:var(--red);font-family:var(--mono);font-size:11px;">${e.message}</div>`;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', ()=>{

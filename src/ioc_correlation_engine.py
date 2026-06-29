@@ -7,10 +7,35 @@ and create weighted confidence scoring based on feed consensus.
 
 import asyncio
 import httpx
+import ipaddress
 import os
 import json
 from typing import Dict, List, Optional, Set, Tuple
 from collections import defaultdict, Counter
+
+
+# Cloudflare anycast ranges — see _SHARED_CDN_CIDRS in crucible_app.py for the
+# canonical list. Duplicated here so the correlation engine can short-circuit
+# OTX pulse lookups against the anycast pool without crossing the module
+# boundary. Refresh from https://www.cloudflare.com/ips-v4 if either copy
+# drifts.
+_CLOUDFLARE_ANYCAST_CIDRS = tuple(ipaddress.ip_network(c) for c in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+))
+
+
+def _is_cloudflare_anycast_ip(value) -> bool:
+    """True if `value` is a Cloudflare anycast IPv4 address."""
+    if not value:
+        return False
+    try:
+        ip = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return False
+    return any(ip in net for net in _CLOUDFLARE_ANYCAST_CIDRS)
 
 
 class IOCCorrelationEngine:
@@ -212,12 +237,27 @@ class IOCCorrelationEngine:
         """Query AlienVault OTX for IOC information"""
         if not self.alienvault_api_key:
             return {"error": "AlienVault OTX API key not configured"}
-        
+
+        # Cloudflare anycast IPs front tens of millions of unrelated tenants —
+        # OTX pulse memberships on the anycast pool are almost always misattributed
+        # shared-infrastructure noise (one bad tenant taints the IP for everyone
+        # else). Return a clean no-pulse result so the IP isn't flagged downstream.
+        if self._is_ip(ioc) and _is_cloudflare_anycast_ip(ioc):
+            result = {
+                "malicious": False,
+                "pulse_count": 0,
+                "pulse_names": [],
+                "sections": [],
+                "suppressed_reason": "cloudflare_anycast",
+            }
+            self.cache[f"otx_{ioc}"] = result
+            return result
+
         # Check cache first
         cache_key = f"otx_{ioc}"
         if cache_key in self.cache:
             return self.cache[cache_key]
-        
+
         try:
             headers = {
                 "X-OTX-API-KEY": self.alienvault_api_key,

@@ -44,6 +44,7 @@ import os
 import re
 import ipaddress
 import pathlib
+import sqlite3
 import subprocess
 import sys
 import time
@@ -97,8 +98,23 @@ async def lifespan(app: FastAPI):
         headers={"User-Agent": "CRUCIBLE-SIGINT/5.0 (OSINT Research Tool)"},
         limits=httpx.Limits(max_connections=30, max_keepalive_connections=15),
     )
-    yield
-    await client.aclose()
+    # Initialize actor/hunt SQLite tables and start the cert monitor workers.
+    try:
+        actor_profiles.init_db()
+        hunt_rules.init_db()
+        cert_monitor.start_workers()
+    except Exception:
+        # Workers failing to start should not block the rest of the app —
+        # the UI will surface the lack of monitor status.
+        pass
+    try:
+        yield
+    finally:
+        try:
+            await cert_monitor.stop_workers()
+        except Exception:
+            pass
+        await client.aclose()
 
 app = FastAPI(title="CRUCIBLE SIGINT", version="5.1", lifespan=lifespan)
 
@@ -112,7 +128,33 @@ DOMAIN_RE = re.compile(r'^([a-z0-9]([a-z0-9\-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$')
 # GLOBAL CONFIG
 # ════════════════════════════════════════════════════════════
 
-# API Keys - Set these as environment variables for security
+# .env loader — populates os.environ from PROJECT_ROOT/.env before the
+# API-key constants below get read. Existing env vars win over .env values
+# (so docker / shell exports stay authoritative for prod). Keeps deps small
+# by not pulling in python-dotenv just for this.
+def _load_dotenv(path: pathlib.Path) -> None:
+    if not path.exists():
+        return
+    try:
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            val = val.strip()
+            # Strip optional matched quotes around the value.
+            if len(val) >= 2 and val[0] == val[-1] and val[0] in ('"', "'"):
+                val = val[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = val
+    except OSError:
+        pass
+
+_load_dotenv(PROJECT_ROOT / ".env")
+
+# API Keys — loaded from .env (or shell env). Add KEY=value lines to .env
+# at the project root; never commit it (already in .gitignore).
 SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY", "")
 VIRUSTOTAL_API_KEY = os.environ.get("VIRUSTOTAL_API_KEY", "")
 ALIENVAULT_API_KEY = os.environ.get("ALIENVAULT_API_KEY", "")
@@ -147,7 +189,6 @@ SPYONWEB_API_KEY = os.environ.get("SPYONWEB_API_KEY", "")
 # (certkit.io is a verified first-class source — see _ct_certkit — not a generic one.)
 CT_PROVIDERS = {
     "scantower":  {"label": "scantower.io",     "key": os.environ.get("SCANTOWER_API_KEY", ""),   "url": os.environ.get("SCANTOWER_CT_URL", "")},
-    "cloudflare": {"label": "Cloudflare Radar", "key": os.environ.get("CLOUDFLARE_API_TOKEN", ""),"url": os.environ.get("CLOUDFLARE_CT_URL", "")},
 }
 
 # Master switch for the automated revalidation feature (Settings tab toggle).
@@ -156,7 +197,7 @@ CT_PROVIDERS = {
 REVALIDATION_ENABLED = os.environ.get("REVALIDATION_ENABLED", "1") not in ("0", "false", "False", "")
 
 # Import the new intelligence extensions
-from intelligence_extensions import fetch_shodan_data, fetch_virustotal_passive_dns, fetch_virustotal_reputation, fetch_reverse_ip_lookup, correlate_ip_neighbors, identify_shared_infrastructure, EXPANDED_PHISHING_PATTERNS, fetch_subdomain_enumeration, check_social_media_presence, map_content_similarity, fetch_threatfox, fetch_otx_ip_passive_dns, fetch_otx_general, fetch_otx_domain_passive_dns, fetch_ip_hosted_domains_intel, fetch_gti_intel, fetch_circl_pdns, fetch_mnemonic_pdns
+from intelligence_extensions import fetch_shodan_data, fetch_virustotal_passive_dns, fetch_virustotal_reputation, fetch_reverse_ip_lookup, correlate_ip_neighbors, identify_shared_infrastructure, EXPANDED_PHISHING_PATTERNS, fetch_subdomain_enumeration, check_social_media_presence, map_content_similarity, fetch_threatfox, fetch_otx_ip_passive_dns, fetch_otx_general, fetch_otx_domain_passive_dns, fetch_ip_hosted_domains_intel, fetch_gti_intel, fetch_circl_pdns, fetch_mnemonic_pdns, fetch_vt_crowdsourced, fetch_vt_sibling_infra, fetch_ct_timing, fetch_kit_fingerprint
 import pdns_store
 import diff_engine
 from pivot_intel import (fetch_seed_fingerprint, shodan_favicon_pivot,
@@ -177,6 +218,15 @@ from asn_intelligence import ASNIntelligence, map_ip_to_asn, bulk_lookup_asns, a
 
 # Import Automated Revalidation functions
 from automated_revalidation import create_automated_revalidation_system
+
+# Actor profiles + hunt rules + cert monitoring + Slack alerting
+import actor_profiles
+import hunt_rules
+import cert_monitor
+import alerting
+
+# scantower.io ACTIVE scanning (separate from the rest of Crucible — see module docstring)
+import scantower
 
 def validate_domain(raw: str) -> Optional[str]:
     s = re.sub(r'^https?://', '', raw.strip().lower())
@@ -250,7 +300,7 @@ def registrable_domain(raw: str) -> Optional[str]:
 # certkit), then crt.sh as fallback, then Censys and pluggable providers. The first
 # enabled source that returns results wins. Substring brand queries skip the
 # exact-domain-only sources (certspotter, certkit) and lean on crt.sh / Censys / providers.
-DEFAULT_CT_SOURCES = ["certspotter", "certkit", "crtsh", "censys", "scantower", "cloudflare"]
+DEFAULT_CT_SOURCES = ["certspotter", "certkit", "crtsh", "censys", "scantower"]
 
 _DOMAINISH_RE = re.compile(r'(?:\*\.)?(?:[a-z0-9_-]+\.)+[a-z]{2,}')
 
@@ -542,6 +592,78 @@ def _is_shared_cdn_ip(ip_str: str) -> bool:
     except ValueError:
         return False
     return any(ip in net for net in _SHARED_CDN_CIDRS)
+
+
+# Cloudflare-only subset of _SHARED_CDN_CIDRS — used to suppress false-positive
+# malicious-attribution findings whose subject is a Cloudflare anycast IP. The
+# anycast pool fronts tens of millions of customer sites; one bad tenant doesn't
+# make the IP itself malicious, so OTX pulse hits / VT verdicts / ThreatFox
+# matches / GTI labels keyed on the anycast IP are noise we drop before they
+# reach the analyst.
+_CLOUDFLARE_CIDRS = tuple(ipaddress.ip_network(c) for c in (
+    "173.245.48.0/20", "103.21.244.0/22", "103.22.200.0/22", "103.31.4.0/22",
+    "141.101.64.0/18", "108.162.192.0/18", "190.93.240.0/20", "188.114.96.0/20",
+    "197.234.240.0/22", "198.41.128.0/17", "162.158.0.0/15", "104.16.0.0/13",
+    "104.24.0.0/14", "172.64.0.0/13", "131.0.72.0/22",
+))
+
+
+def _is_cloudflare_anycast_ip(value) -> bool:
+    """True if ``value`` is a Cloudflare anycast IPv4 address."""
+    if not value:
+        return False
+    try:
+        ip = ipaddress.ip_address(str(value).strip())
+    except ValueError:
+        return False
+    return any(ip in net for net in _CLOUDFLARE_CIDRS)
+
+
+def _finding_subject_ip(finding: dict, context_seed: str = "") -> str:
+    """Extract the IP a finding is attributing malicious activity to.
+
+    Findings can carry the subject IP in several places depending on the
+    emitter — top-level `ip`, `seed`, `details.seed`, `details.ip`, or the
+    request-level `context_seed`. Return the first one that parses as an IP.
+    """
+    details = finding.get("details") or {}
+    for candidate in (
+        finding.get("ip"),
+        details.get("ip"),
+        details.get("seed"),
+        finding.get("seed"),
+        context_seed,
+    ):
+        if not candidate:
+            continue
+        try:
+            ipaddress.ip_address(str(candidate).strip())
+        except ValueError:
+            continue
+        return str(candidate).strip()
+    return ""
+
+
+def _suppress_cloudflare_anycast_findings(findings: list,
+                                         *, context_seed: str = "") -> list:
+    """Drop findings whose subject IP is a Cloudflare anycast address.
+
+    A Cloudflare anycast IP can be associated with millions of unrelated
+    tenants — flagging it as malicious because one tenant is bad is a
+    classic shared-infrastructure false positive. We strip those findings
+    at the source so they never reach the UI, the actor-profile evidence
+    timeline, or Slack alerts. Verdicts about the *domain* keep flowing
+    unchanged — only IP-keyed malicious attributions are suppressed.
+    """
+    if not findings:
+        return findings
+    out: list = []
+    for f in findings:
+        subject_ip = _finding_subject_ip(f, context_seed=context_seed)
+        if subject_ip and _is_cloudflare_anycast_ip(subject_ip):
+            continue
+        out.append(f)
+    return out
 
 def classify_ip_hosting(info: dict, domain_count: int) -> dict:
     """Decide whether an IP is shared hosting / CDN, where co-located domains are NOT
@@ -1207,7 +1329,9 @@ def _findings_from_otx_pulses(otx_general: dict, *, context_seed: str = "") -> l
                     "source": "otx",
                     "seed": context_seed or seed,
                 })
-    return findings
+    return _suppress_cloudflare_anycast_findings(
+        findings, context_seed=context_seed,
+    )
 
 
 def _findings_from_vt(vt_rep: dict, *, context_seed: str = "") -> list:
@@ -1231,7 +1355,7 @@ def _findings_from_vt(vt_rep: dict, *, context_seed: str = "") -> list:
     else:
         return []
 
-    return [{
+    return _suppress_cloudflare_anycast_findings([{
         "severity": severity, "category": "virustotal",
         "title": f"VT verdict: {vt_rep.get('verdict', 'unknown')}",
         "message": (
@@ -1250,7 +1374,7 @@ def _findings_from_vt(vt_rep: dict, *, context_seed: str = "") -> list:
         },
         "source": "virustotal",
         "seed": context_seed or seed,
-    }]
+    }], context_seed=context_seed)
 
 
 def _findings_from_gti(gti_data: dict, *, context_seed: str = "") -> list:
@@ -1349,7 +1473,207 @@ def _findings_from_gti(gti_data: dict, *, context_seed: str = "") -> list:
                             "permalink": permalink},
                 "source": "gti", "seed": context_seed or seed,
             })
-    return findings
+    return _suppress_cloudflare_anycast_findings(
+        findings, context_seed=context_seed,
+    )
+
+
+def _findings_from_crowdsourced(cs: dict, *, context_seed: str = "") -> list:
+    """VT crowdsourced + community → findings.
+
+    Any YARA hit is high — the community-attributed rulesets ("APT_*",
+    "Mandiant_*", "ESET_*") are the most likely public source of attribution
+    on an otherwise-clean lookalike. IDS / Sigma hits are high when the rule
+    severity is "critical" or "high", else medium. Comments are surfaced
+    only when tagged or upvoted (raw comments stay in the panel).
+    """
+    if not cs or "error" in cs:
+        return []
+    out: list = []
+    seed = cs.get("seed") or context_seed or ""
+    permalink = cs.get("permalink") or ""
+    com_permalink = cs.get("community_permalink") or ""
+
+    yara = cs.get("yara_hits") or []
+    if yara:
+        names = ", ".join(
+            (y.get("rule_name") or "?") for y in yara[:3]
+        )
+        out.append({
+            "severity": "high", "category": "vt_crowdsourced",
+            "title": "VT crowdsourced YARA hit",
+            "message": f"VT crowdsourced YARA matched {seed}: {names}"
+                      + (f" (+{len(yara)-3} more)" if len(yara) > 3 else ""),
+            "url": permalink,
+            "details": {"seed": seed, "yara_hits": yara,
+                        "permalink": permalink},
+            "source": "vt_crowdsourced",
+            "seed": context_seed or seed,
+        })
+
+    ids = cs.get("ids_hits") or []
+    if ids:
+        high = [h for h in ids
+                if (h.get("alert_severity") or "").lower()
+                   in ("critical", "high")]
+        sev = "high" if high else "medium"
+        msgs = ", ".join((h.get("rule_msg") or "?") for h in ids[:3])
+        out.append({
+            "severity": sev, "category": "vt_crowdsourced",
+            "title": "VT crowdsourced IDS rule hit",
+            "message": f"IDS rule(s) on {seed}: {msgs}"
+                      + (f" (+{len(ids)-3} more)" if len(ids) > 3 else ""),
+            "url": permalink,
+            "details": {"seed": seed, "ids_hits": ids, "permalink": permalink},
+            "source": "vt_crowdsourced",
+            "seed": context_seed or seed,
+        })
+
+    sigma = cs.get("sigma_hits") or []
+    if sigma:
+        titles = ", ".join(
+            (s.get("rule_title") or "?") for s in sigma[:3]
+        )
+        crit = any(
+            (s.get("rule_level") or "").lower() in ("critical", "high")
+            for s in sigma
+        )
+        out.append({
+            "severity": "high" if crit else "medium",
+            "category": "vt_crowdsourced",
+            "title": "VT Sigma analysis hit",
+            "message": f"Sigma rule hit on {seed}: {titles}",
+            "url": permalink,
+            "details": {"seed": seed, "sigma_hits": sigma,
+                        "permalink": permalink},
+            "source": "vt_crowdsourced",
+            "seed": context_seed or seed,
+        })
+
+    comments = cs.get("comments") or []
+    flagged = [c for c in comments
+               if (c.get("tags") or [])
+               or (c.get("votes") or {}).get("positive", 0) >= 2]
+    if flagged:
+        out.append({
+            "severity": "medium", "category": "vt_crowdsourced",
+            "title": "VT community comment(s) on seed",
+            "message": (
+                f"{len(flagged)} flagged/upvoted community comment(s) on {seed}"
+                " — sometimes the only public attribution lives here"
+            ),
+            "url": com_permalink or permalink,
+            "details": {"seed": seed, "flagged_comments": flagged,
+                        "permalink": com_permalink or permalink},
+            "source": "vt_crowdsourced",
+            "seed": context_seed or seed,
+        })
+    return _suppress_cloudflare_anycast_findings(
+        out, context_seed=context_seed,
+    )
+
+
+def _findings_from_kit_fp(fp: dict, *, context_seed: str = "") -> list:
+    """Kit / origin fingerprints → findings."""
+    if not fp or "error" in fp:
+        return []
+    out: list = []
+    seed = fp.get("domain") or context_seed or ""
+
+    for h in (fp.get("path_hits") or []):
+        out.append({
+            "severity": h.get("severity") or "high",
+            "category": "kit_fingerprint",
+            "title": h.get("label") or "Kit path fingerprint hit",
+            "message": f"{h.get('host')}: {h.get('note') or h.get('label')}",
+            "url": "",
+            "details": h,
+            "source": "kit_fingerprint",
+            "seed": context_seed or seed,
+        })
+    for h in (fp.get("subdomain_hits") or []):
+        out.append({
+            "severity": h.get("severity") or "medium",
+            "category": "kit_fingerprint",
+            "title": h.get("label") or "Kit subdomain pattern hit",
+            "message": f"{h.get('host')}: {h.get('note') or h.get('label')}",
+            "url": "",
+            "details": h,
+            "source": "kit_fingerprint",
+            "seed": context_seed or seed,
+        })
+    for h in (fp.get("origin_hits") or []):
+        out.append({
+            "severity": "medium", "category": "kit_fingerprint",
+            "title": f"Cheap-origin host: {h.get('provider')}",
+            "message": (
+                f"{h.get('host')} resolves through {h.get('provider')}"
+                f" ({h.get('needle')}) — common kit-hosting origin"
+            ),
+            "url": "",
+            "details": h,
+            "source": "kit_fingerprint",
+            "seed": context_seed or seed,
+        })
+    return out
+
+
+def _findings_from_ct_timing(ct: dict, *, context_seed: str = "") -> list:
+    """CT issuance timing / ACME → findings.
+
+    Surface (a) ACME-machine-issued certificate shape (cheap kit infra),
+    (b) burst issuance (≤1 day median gap with >5 certs) which often
+    signals kit deployment, (c) SAN-sibling clustering when ≥5 distinct
+    sibling names share a cert.
+    """
+    if not ct or "error" in ct:
+        return []
+    seed = ct.get("domain") or context_seed or ""
+    out: list = []
+    if ct.get("acme_signal"):
+        out.append({
+            "severity": "medium", "category": "ct_timing",
+            "title": "ACME-issued cert shape",
+            "message": (
+                f"{seed}: {ct.get('short_lived_pct')}% short-lived certs"
+                f" from {', '.join(list((ct.get('issuers') or {}).keys())[:2])}"
+                " — machine-issued ACME shape typical of kit infra"
+            ),
+            "url": ct.get("permalink") or "",
+            "details": ct, "source": "ct_timing",
+            "seed": context_seed or seed,
+        })
+    gap = ct.get("median_gap_days")
+    if (gap is not None and gap <= 1
+            and (ct.get("issuance_count") or 0) >= 5):
+        out.append({
+            "severity": "medium", "category": "ct_timing",
+            "title": "CT burst issuance",
+            "message": (
+                f"{seed}: {ct.get('issuance_count')} certs with median gap"
+                f" {gap}d — burst-issuance pattern common at kit roll-out"
+            ),
+            "url": ct.get("permalink") or "",
+            "details": ct, "source": "ct_timing",
+            "seed": context_seed or seed,
+        })
+    sib_count = ct.get("san_sibling_count") or 0
+    if sib_count >= 5:
+        sample = ", ".join(
+            s.get("name", "") for s in (ct.get("san_siblings") or [])[:5]
+        )
+        out.append({
+            "severity": "high", "category": "ct_timing",
+            "title": "CT SAN-sibling cluster",
+            "message": (
+                f"{seed}: {sib_count} distinct SAN siblings across observed"
+                f" certs (e.g., {sample}) — pivot to investigate"
+            ),
+            "url": ct.get("permalink") or "",
+            "details": ct, "source": "ct_timing",
+            "seed": context_seed or seed,
+        })
+    return out
 
 
 def _findings_from_threatfox(tf_data: dict, *, context_seed: str = "") -> list:
@@ -1413,7 +1737,9 @@ def _findings_from_threatfox(tf_data: dict, *, context_seed: str = "") -> list:
             "source": "threatfox",
             "seed": context_seed,
         })
-    return findings
+    return _suppress_cloudflare_anycast_findings(
+        findings, context_seed=context_seed,
+    )
 
 
 def sse(event: str, data: dict) -> str:
@@ -1565,7 +1891,7 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
         # Identify which CT source actually answered, for an accurate log + chip state.
         src = (certs[0].get("_source") if certs else None) or "crtsh"
         src_label = {"crtsh":"crt.sh","certspotter":"certspotter","certkit":"certkit.io",
-                     "censys":"censys","scantower":"scantower","cloudflare":"cloudflare"}.get(src, src)
+                     "censys":"censys","scantower":"scantower"}.get(src, src)
         result["domains"] = extract_domains_from_certs(certs, seed)
         yield sse("log",{"msg":f"S1: {len(certs)} certs via {src_label} → {len(result['domains'])} domains","type":"ok","stage":"S1"})
         neibu = [d for d in result["domains"] if d.get("flag")=="NEIBU"]
@@ -2334,9 +2660,9 @@ async def run_standard_pipeline(seed: str, ct_sources: set[str] | None = None, f
             yield sse("log", {"msg": f"S10: JARM fingerprints — {len(jarms)} distinct across {total_eps} endpoint(s)", "type": "warn", "stage":"S10"})
             for j in jarms[:6]:
                 eps = j.get("endpoint_count", 0)
-                ips = j.get("distinct_ips", 0)
+                n_ips = j.get("distinct_ips", 0)
                 ep0 = (j.get("endpoints") or [{}])[0]
-                yield sse("log", {"msg": f"S10: JARM {j['jarm']} — {eps} endpoint(s) across {ips} IP(s) (e.g. {ep0.get('ip','?')}:{ep0.get('port','?')})", "type": "ok", "stage":"S10"})
+                yield sse("log", {"msg": f"S10: JARM {j['jarm']} — {eps} endpoint(s) across {n_ips} IP(s) (e.g. {ep0.get('ip','?')}:{ep0.get('port','?')})", "type": "ok", "stage":"S10"})
             yield sse("jarmPivot", {"jarms": jarms})
         elif raw_jarm_count:
             yield sse("log", {"msg": f"S10: Shodan returned {raw_jarm_count} JARM record(s) but all were the all-zero null sentinel — no usable fingerprint (host likely behind CDN / refused TLS probe)", "type": "info", "stage":"S10"})
@@ -3575,21 +3901,29 @@ async def api_domain_detail(domain: str = Query(...), brand: str = Query(None)):
 
 @app.get("/api/settings")
 async def get_settings():
-    """Get current settings configuration"""
+    """Get current settings snapshot.
+
+    API keys are loaded from .env at startup (see _load_dotenv). The
+    `*_api_key_configured` booleans are read-only — they reflect which
+    env vars are populated. To change a key, edit .env and restart.
+    """
     return JSONResponse({
-        "shodan_api_key_configured": bool(SHODAN_API_KEY),
-        "virustotal_api_key_configured": bool(VIRUSTOTAL_API_KEY),
-        "alienvault_api_key_configured": bool(ALIENVAULT_API_KEY),
-        "abusech_api_key_configured": bool(ABUSECH_API_KEY),
-        "censys_api_key_configured": bool(CENSYS_API_ID and CENSYS_API_SECRET),
+        "shodan_api_key_configured":      bool(SHODAN_API_KEY),
+        "virustotal_api_key_configured":  bool(VIRUSTOTAL_API_KEY),
+        "alienvault_api_key_configured":  bool(ALIENVAULT_API_KEY),
+        "abusech_api_key_configured":     bool(ABUSECH_API_KEY),
+        "censys_api_key_configured":      bool(CENSYS_API_ID and CENSYS_API_SECRET),
         "certspotter_api_key_configured": bool(CERTSPOTTER_API_KEY),
+        "urlscan_api_key_configured":     bool(URLSCAN_API_KEY),
+        "spyonweb_api_key_configured":    bool(SPYONWEB_API_KEY),
+        "circl_pdns_configured":          bool(CIRCL_PDNS_USERNAME and CIRCL_PDNS_PASSWORD),
+        "mnemonic_api_key_configured":    bool(MNEMONIC_API_KEY),
         "certificate_transparency_sources": {
-            "certspotter": True,   # primary — free, no key required
-            "certkit": True,       # free, no key required (100 certs/query free tier)
-            "crtsh": True,         # fallback — free, no key required
-            "censys": bool(CENSYS_API_ID and CENSYS_API_SECRET),
-            "scantower": bool(CT_PROVIDERS["scantower"]["key"] and CT_PROVIDERS["scantower"]["url"]),
-            "cloudflare": bool(CT_PROVIDERS["cloudflare"]["key"] and CT_PROVIDERS["cloudflare"]["url"]),
+            "certspotter": True,
+            "certkit": True,
+            "crtsh": True,
+            "censys":     bool(CENSYS_API_ID and CENSYS_API_SECRET),
+            "scantower":  bool(CT_PROVIDERS["scantower"]["key"] and CT_PROVIDERS["scantower"]["url"]),
         },
         "ct_providers": {
             name: {"label": cfg["label"], "key_configured": bool(cfg["key"]), "url_configured": bool(cfg["url"])}
@@ -3598,96 +3932,11 @@ async def get_settings():
         "revalidation_enabled": REVALIDATION_ENABLED,
     })
 
-# Note: keys arrive in the JSON request body ({"key": "..."}) sent by the Settings UI,
-# so these read from Body(embed=True) rather than a query parameter.
-@app.post("/api/settings/shodan")
-async def update_shodan_key(key: str = Body(..., embed=True)):
-    """Update Shodan API key (in memory only for this session)"""
-    global SHODAN_API_KEY
-    SHODAN_API_KEY = key
-    return JSONResponse({"status": "success", "message": "Shodan API key updated"})
 
-@app.post("/api/settings/virustotal")
-async def update_virustotal_key(key: str = Body(..., embed=True)):
-    """Update VirusTotal API key (in memory only for this session)"""
-    global VIRUSTOTAL_API_KEY
-    VIRUSTOTAL_API_KEY = key
-    return JSONResponse({"status": "success", "message": "VirusTotal API key updated"})
+# API-key POST endpoints removed — keys come from .env now. Editing .env
+# requires a server restart (intentional: writable secrets-over-HTTP was
+# the previous arrangement and is no longer accepted).
 
-
-@app.post("/api/settings/alienvault")
-async def update_alienvault_key(key: str = Body(..., embed=True)):
-    """Update AlienVault OTX API key (in memory only for this session)"""
-    global ALIENVAULT_API_KEY
-    ALIENVAULT_API_KEY = key
-    return JSONResponse({"status": "success", "message": "AlienVault OTX API key updated"})
-
-# Accept the 'otx' alias the Settings UI uses for AlienVault OTX.
-@app.post("/api/settings/otx")
-async def update_otx_key(key: str = Body(..., embed=True)):
-    global ALIENVAULT_API_KEY
-    ALIENVAULT_API_KEY = key
-    return JSONResponse({"status": "success", "message": "AlienVault OTX API key updated"})
-
-@app.post("/api/settings/abusech")
-async def update_abusech_key(key: str = Body(..., embed=True)):
-    """Update abuse.ch unified Auth-Key (in memory only for this session).
-    Used for ThreatFox / URLHaus / MalwareBazaar lookups."""
-    global ABUSECH_API_KEY
-    ABUSECH_API_KEY = key
-    return JSONResponse({"status": "success", "message": "abuse.ch API key updated"})
-
-@app.post("/api/settings/censys")
-async def update_censys_key(key: str = Body(..., embed=True)):
-    """Update Censys API key (in memory only for this session)
-    Key should be in format 'API_ID:API_SECRET'"""
-    global CENSYS_API_ID, CENSYS_API_SECRET
-    if ":" in key:
-        api_id, api_secret = key.split(":", 1)
-        CENSYS_API_ID = api_id
-        CENSYS_API_SECRET = api_secret
-        return JSONResponse({"status": "success", "message": "Censys API key updated"})
-    else:
-        return JSONResponse({"status": "error", "message": "Invalid format. Key should be 'API_ID:API_SECRET'"})
-
-@app.post("/api/settings/certspotter")
-async def update_certspotter_key(key: str = Body(..., embed=True)):
-    """Update Cert Spotter (SSLMate) API key — raises CT query rate limits."""
-    global CERTSPOTTER_API_KEY
-    CERTSPOTTER_API_KEY = key
-    return JSONResponse({"status": "success", "message": "Cert Spotter API key updated"})
-
-@app.post("/api/settings/urlscan")
-async def update_urlscan_key(key: str = Body(..., embed=True)):
-    """Update urlscan.io API key — raises tracking-ID search quota for the
-    Cluster auto-expand."""
-    global URLSCAN_API_KEY
-    URLSCAN_API_KEY = key
-    return JSONResponse({"status": "success", "message": "urlscan.io API key updated"})
-
-@app.post("/api/settings/spyonweb")
-async def update_spyonweb_key(key: str = Body(..., embed=True)):
-    """Update SpyOnWeb access token — enables Analytics/AdSense ID reverse
-    lookup in the Cluster auto-expand."""
-    global SPYONWEB_API_KEY
-    SPYONWEB_API_KEY = key
-    return JSONResponse({"status": "success", "message": "SpyOnWeb access token updated"})
-
-@app.post("/api/settings/ctprovider/{name}")
-async def update_ct_provider(name: str, key: str = Body("", embed=True), url: str = Body("", embed=True)):
-    """Configure a pluggable CT provider (certkit / scantower / cloudflare): its API
-    key and a URL template containing {q} (substituted with the brand/domain)."""
-    if name not in CT_PROVIDERS:
-        return JSONResponse({"status": "error", "message": f"Unknown CT provider '{name}'"}, status_code=400)
-    if url and "{q}" not in url:
-        return JSONResponse({"status": "error",
-                             "message": "URL template must contain {q} where the domain/brand goes"}, status_code=400)
-    CT_PROVIDERS[name]["key"] = key
-    CT_PROVIDERS[name]["url"] = url
-    enabled = bool(key and url)
-    return JSONResponse({"status": "success",
-                         "message": f"{CT_PROVIDERS[name]['label']} {'configured and enabled' if enabled else 'updated (needs both key and URL to activate)'}",
-                         "enabled": enabled})
 
 @app.post("/api/settings/revalidation")
 async def update_revalidation_enabled(enabled: bool = Query(...)):
@@ -3793,6 +4042,63 @@ async def api_gti(seed: str):
     return JSONResponse(gti_data)
 
 
+@app.get("/api/gti/crowdsourced/{seed}")
+async def api_gti_crowdsourced(seed: str):
+    """VT crowdsourced YARA / IDS / Sigma + Community comments — sometimes
+    the only public attribution lives here."""
+    validated, kind = validate_seed(seed)
+    if not validated or kind not in ("ip", "domain"):
+        return JSONResponse({"error": "Invalid IP or domain"}, status_code=400)
+    data = await fetch_vt_crowdsourced(validated, VIRUSTOTAL_API_KEY)
+    data["findings"] = _findings_from_crowdsourced(
+        data, context_seed=validated,
+    )
+    return JSONResponse(data)
+
+
+@app.get("/api/gti/siblings/{seed}")
+async def api_gti_siblings(seed: str, max_per_rel: int = 25):
+    """Sibling-infrastructure clustering via GTI/VT relationships —
+    registrar, historical WHOIS, CAA, CNAME, historical SSL, resolutions."""
+    validated, kind = validate_seed(seed)
+    if not validated or kind not in ("ip", "domain"):
+        return JSONResponse({"error": "Invalid IP or domain"}, status_code=400)
+    capped = max(5, min(int(max_per_rel or 25), 50))
+    data = await fetch_vt_sibling_infra(validated, VIRUSTOTAL_API_KEY,
+                                        max_per_rel=capped)
+    return JSONResponse(data)
+
+
+@app.get("/api/gti/ct-timing/{domain}")
+async def api_gti_ct_timing(domain: str):
+    """CT issuance timing + issuer mix + SAN siblings + ACME-client signal
+    for the apex domain. Useful to separate Kali365 vs EvilTokens vs
+    Storm-2372-adjacent infra by issuance shape."""
+    validated, kind = validate_seed(domain)
+    if not validated or kind != "domain":
+        return JSONResponse({"error": "Invalid domain"}, status_code=400)
+    data = await fetch_ct_timing(validated)
+    data["findings"] = _findings_from_ct_timing(
+        data, context_seed=validated,
+    )
+    return JSONResponse(data)
+
+
+@app.get("/api/gti/kit-fingerprint/{domain}")
+async def api_gti_kit_fingerprint(domain: str):
+    """Kit / origin fingerprint on the discovered subdomain set —
+    Storm-2372-shaped paths, AzureAD-mimicking subdomains, Railway /
+    Workers / Vercel hosted origins."""
+    validated, kind = validate_seed(domain)
+    if not validated or kind != "domain":
+        return JSONResponse({"error": "Invalid domain"}, status_code=400)
+    data = await fetch_kit_fingerprint(validated, VIRUSTOTAL_API_KEY)
+    data["findings"] = _findings_from_kit_fp(
+        data, context_seed=validated,
+    )
+    return JSONResponse(data)
+
+
 # ════════════════════════════════════════════════════════════
 # AUTOMATED REVALIDATION API ENDPOINTS
 # ════════════════════════════════════════════════════════════
@@ -3883,6 +4189,365 @@ async def get_domain_revalidation_status(domain: str):
         "domain_data": domain_data,
         "decay_score": system.decay_scores.get(validated, 0.0)
     })
+
+
+# ════════════════════════════════════════════════════════════
+# ACTOR PROFILES — campaign / actor aggregation
+# ════════════════════════════════════════════════════════════
+
+@app.get("/api/actors")
+async def api_actors_list():
+    try:
+        return JSONResponse({"profiles": actor_profiles.list_profiles()})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+_PROFILE_CREATE_FIELDS = ("aliases", "notes", "severity", "tags",
+                          "motivation", "origin_country",
+                          "first_seen", "last_seen", "targets")
+
+
+@app.post("/api/actors")
+async def api_actors_create(body: dict = Body(...)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    try:
+        kwargs = {f: body[f] for f in _PROFILE_CREATE_FIELDS if f in body}
+        pid = actor_profiles.create_profile(
+            name=name,
+            profile_id=body.get("id") or None,
+            **kwargs,
+        )
+    except (ValueError, sqlite3.IntegrityError) as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"id": pid, "profile": actor_profiles.get_profile(pid)})
+
+
+@app.get("/api/actors/{profile_id}")
+async def api_actors_get(profile_id: str):
+    p = actor_profiles.get_profile(profile_id)
+    if not p:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(p)
+
+
+@app.patch("/api/actors/{profile_id}")
+async def api_actors_update(profile_id: str, body: dict = Body(...)):
+    try:
+        ok = actor_profiles.update_profile(profile_id, **body)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if not ok:
+        return JSONResponse({"error": "not found or no changes"},
+                            status_code=404)
+    return JSONResponse({"profile": actor_profiles.get_profile(profile_id)})
+
+
+@app.delete("/api/actors/{profile_id}")
+async def api_actors_delete(profile_id: str):
+    ok = actor_profiles.delete_profile(profile_id)
+    return JSONResponse({"status": "deleted" if ok else "not_found"})
+
+
+@app.post("/api/actors/{profile_id}/attribute")
+async def api_actors_attribute(profile_id: str, body: dict = Body(...)):
+    """Attach evidence to a profile.
+
+    Body: {evidence: {...}, source: str, source_seed: str,
+           category: str, confidence: str, tags: [str],
+           notify: bool}. notify=True fires a Slack alert."""
+    if not actor_profiles.get_profile(profile_id):
+        return JSONResponse({"error": "profile not found"}, status_code=404)
+    evidence = body.get("evidence") or {}
+    if not isinstance(evidence, dict) or not evidence:
+        return JSONResponse({"error": "evidence dict required"},
+                            status_code=400)
+    eid = actor_profiles.attribute_evidence(
+        profile_id, evidence,
+        source=body.get("source") or "manual",
+        source_seed=body.get("source_seed") or "",
+        category=body.get("category") or "",
+        confidence=body.get("confidence") or "",
+        tags=body.get("tags") or [],
+    )
+    if body.get("notify"):
+        try:
+            await alerting.dispatch_attribution_alert(
+                profile=actor_profiles.get_profile(profile_id),
+                evidence=evidence,
+                source_seed=body.get("source_seed") or "",
+            )
+        except Exception:
+            pass
+    return JSONResponse({
+        "evidence_id": eid,
+        "profile": actor_profiles.get_profile(profile_id),
+    })
+
+
+@app.delete("/api/actors/evidence/{evidence_id}")
+async def api_actors_detach(evidence_id: int):
+    ok = actor_profiles.detach_evidence(evidence_id)
+    return JSONResponse({"status": "detached" if ok else "not_found"})
+
+
+@app.post("/api/actors/{profile_id}/references")
+async def api_actors_add_reference(profile_id: str, body: dict = Body(...)):
+    """Attach an external reference (vendor report URL, blog, tweet, MITRE
+    entry) to a profile. Body: {title, url, source?, notes?}."""
+    title = (body.get("title") or "").strip()
+    url = (body.get("url") or "").strip()
+    if not title or not url:
+        return JSONResponse({"error": "title and url are required"},
+                            status_code=400)
+    try:
+        rid = actor_profiles.add_reference(
+            profile_id, title=title, url=url,
+            source=body.get("source") or "",
+            notes=body.get("notes") or "",
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({
+        "reference_id": rid,
+        "profile": actor_profiles.get_profile(profile_id),
+    })
+
+
+@app.delete("/api/actors/references/{reference_id}")
+async def api_actors_del_reference(reference_id: int):
+    ok = actor_profiles.delete_reference(reference_id)
+    return JSONResponse({"status": "deleted" if ok else "not_found"})
+
+
+# ════════════════════════════════════════════════════════════
+# HUNT RULES + MATCH QUEUE
+# ════════════════════════════════════════════════════════════
+
+@app.get("/api/hunts")
+async def api_hunts_list():
+    try:
+        return JSONResponse({
+            "rules": hunt_rules.list_rules(enabled_only=False),
+            "monitor": cert_monitor.MonitorStatus.snapshot(),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/hunts")
+async def api_hunts_create(body: dict = Body(...)):
+    name = (body.get("name") or "").strip()
+    if not name:
+        return JSONResponse({"error": "name is required"}, status_code=400)
+    condition = body.get("condition")
+    if not isinstance(condition, dict):
+        return JSONResponse({"error": "condition (dict) is required"},
+                            status_code=400)
+    try:
+        rid = hunt_rules.create_rule(
+            name=name,
+            condition=condition,
+            description=body.get("description") or "",
+            meta=body.get("meta") or {},
+            profile_id=body.get("profile_id") or None,
+            enabled=bool(body.get("enabled", True)),
+        )
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return JSONResponse({"id": rid, "rule": hunt_rules.get_rule(rid)})
+
+
+@app.get("/api/hunts/{rule_id}")
+async def api_hunts_get(rule_id: int):
+    r = hunt_rules.get_rule(rule_id)
+    if not r:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse(r)
+
+
+@app.patch("/api/hunts/{rule_id}")
+async def api_hunts_update(rule_id: int, body: dict = Body(...)):
+    try:
+        ok = hunt_rules.update_rule(rule_id, **body)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if not ok:
+        return JSONResponse({"error": "not found or no changes"},
+                            status_code=404)
+    return JSONResponse({"rule": hunt_rules.get_rule(rule_id)})
+
+
+@app.delete("/api/hunts/{rule_id}")
+async def api_hunts_delete(rule_id: int):
+    ok = hunt_rules.delete_rule(rule_id)
+    return JSONResponse({"status": "deleted" if ok else "not_found"})
+
+
+@app.get("/api/hunts/{rule_id}/matches")
+async def api_hunts_matches(rule_id: int, status: str | None = None,
+                            limit: int = 200):
+    return JSONResponse({
+        "matches": hunt_rules.list_matches(
+            rule_id=rule_id, status=status, limit=max(1, min(limit, 500)),
+        ),
+    })
+
+
+@app.get("/api/hunts/matches/all")
+async def api_hunts_matches_all(status: str | None = "pending",
+                                limit: int = 200):
+    """Cross-rule queue — defaults to pending matches for the review tab."""
+    return JSONResponse({
+        "matches": hunt_rules.list_matches(
+            rule_id=None, status=status, limit=max(1, min(limit, 500)),
+        ),
+    })
+
+
+@app.post("/api/hunts/matches/{match_id}/accept")
+async def api_hunts_match_accept(match_id: int, body: dict | None = Body(None)):
+    """Accept a queued match. If the rule has a bound profile_id (and no
+    body override), the match evidence is attributed to that profile."""
+    body = body or {}
+    match = hunt_rules.get_match(match_id)
+    if not match:
+        return JSONResponse({"error": "match not found"}, status_code=404)
+    hunt_rules.update_match_status(match_id, "accepted")
+
+    # Attribute to a profile if the rule had one (override via body).
+    profile_id = body.get("profile_id") or match.get("profile_id") or ""
+    if profile_id and actor_profiles.get_profile(profile_id):
+        actor_profiles.attribute_evidence(
+            profile_id,
+            evidence={
+                "finding":  f"Hunt match: {match.get('rule_name','?')}",
+                "matched_value": match.get("matched_value"),
+                "predicates":    (match.get("evidence") or {}).get("predicates") or [],
+                "source":        match.get("source"),
+                "seen_at":       match.get("seen_at"),
+            },
+            source="hunt_match",
+            source_seed=match.get("matched_value") or "",
+        )
+    return JSONResponse({"status": "accepted", "attributed_to": profile_id or None})
+
+
+@app.post("/api/hunts/matches/{match_id}/reject")
+async def api_hunts_match_reject(match_id: int):
+    if not hunt_rules.get_match(match_id):
+        return JSONResponse({"error": "match not found"}, status_code=404)
+    hunt_rules.update_match_status(match_id, "rejected")
+    return JSONResponse({"status": "rejected"})
+
+
+@app.get("/api/hunts/{rule_id}/livehunt-yaml")
+async def api_hunts_livehunt_yaml(rule_id: int):
+    r = hunt_rules.get_rule(rule_id)
+    if not r:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return JSONResponse({"yaml": hunt_rules.livehunt_yaml(r)})
+
+
+@app.get("/api/monitor/status")
+async def api_monitor_status():
+    return JSONResponse({
+        "monitor":   cert_monitor.MonitorStatus.snapshot(),
+        "alerting":  {"slack_enabled": alerting.alerting_enabled()},
+    })
+
+
+@app.post("/api/monitor/test-alert")
+async def api_monitor_test_alert():
+    """Fire a one-shot test message at the Slack webhook so the analyst
+    can verify wiring without waiting for a real match."""
+    if not alerting.alerting_enabled():
+        return JSONResponse({
+            "status": "disabled",
+            "message": "SLACK_WEBHOOK_URL not set in .env",
+        }, status_code=400)
+    ok = await alerting.dispatch_test_message()
+    return JSONResponse({"status": "sent" if ok else "failed"})
+
+
+# ════════════════════════════════════════════════════════════
+# SCANTOWER — ACTIVE SCANNING (sanctioned use only)
+# ════════════════════════════════════════════════════════════
+# NOTE: Unlike the rest of Crucible (passive OSINT only), scantower
+# triggers REAL HTTP / port / SSL scans against the target. The route
+# requires an explicit `authorized: true` flag in the request body so
+# the UI can never accidentally probe unauthorised infrastructure.
+
+@app.post("/api/scantower/scan")
+async def api_scantower_scan(body: dict = Body(...)):
+    if not scantower.is_configured():
+        return JSONResponse(
+            {"error": "SCANTOWER_API_KEY not configured in .env"},
+            status_code=400,
+        )
+    url = (body.get("url") or "").strip()
+    if not url:
+        return JSONResponse({"error": "url is required"}, status_code=400)
+    if not body.get("authorized"):
+        return JSONResponse(
+            {"error": "Active scan refused — set authorized:true to confirm "
+                      "you have permission to probe this target."},
+            status_code=400,
+        )
+    res = await scantower.trigger_scan(
+        url,
+        scan_type      = body.get("scan_type") or "full",
+        port_scan      = bool(body.get("port_scan", True)),
+        browser_scan   = bool(body.get("browser_scan", True)),
+        misconfiguration = bool(body.get("misconfiguration", True)),
+    )
+    return JSONResponse(res, status_code=400 if "error" in res else 200)
+
+
+@app.get("/api/scantower/scan/{scan_id}")
+async def api_scantower_scan_get(scan_id: str, wait: bool = False,
+                                 timeout: int = 60):
+    """If wait=True, polls until the scan finishes (or timeout). Always
+    returns the raw scan state."""
+    if not scantower.is_configured():
+        return JSONResponse(
+            {"error": "SCANTOWER_API_KEY not configured in .env"},
+            status_code=400,
+        )
+    if wait:
+        return JSONResponse(await scantower.poll_scan(
+            scan_id, timeout=max(10, min(int(timeout), 300)),
+        ))
+    # Quick one-shot status pull
+    async with httpx.AsyncClient(timeout=20.0) as _c:
+        return JSONResponse(await scantower._get_scan(_c, scan_id))
+
+
+@app.get("/api/scantower/report/{scan_id}")
+async def api_scantower_report(scan_id: str, seed: str = ""):
+    """Fetch the full scan report and the Crucible-normalised intel."""
+    if not scantower.is_configured():
+        return JSONResponse(
+            {"error": "SCANTOWER_API_KEY not configured in .env"},
+            status_code=400,
+        )
+    raw = await scantower.fetch_report(scan_id)
+    if "error" in raw:
+        return JSONResponse(raw, status_code=400)
+    intel = scantower.extract_intel(raw, seed_domain=seed)
+    return JSONResponse({"report": raw.get("report"), "intel": intel})
+
+
+@app.get("/api/scantower/scans")
+async def api_scantower_list_scans(limit: int = 20):
+    return JSONResponse(await scantower.list_scans(limit=limit))
+
+
+@app.get("/api/scantower/sites")
+async def api_scantower_list_sites(limit: int = 20):
+    return JSONResponse(await scantower.list_sites(limit=limit))
 
 
 @app.get("/health")
